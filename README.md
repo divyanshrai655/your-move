@@ -9,30 +9,29 @@ following, then shows whether you matched the player and what the engine thought
 ## Run it
 
 ```bash
-python3 watcher.py "https://lichess.org/broadcast/<tour>/<round>/<roundId>/<gameId>"
+cd ~/your-move
+python3 watcher.py
 ```
 
-This serves the app at http://localhost:8765 and pops up a desktop dialog on every
-new move, even with no browser open. Choose **Open board** to jump to that game.
+Then open http://localhost:8765 and paste any Lichess broadcast or game link.
 
-- A broadcast URL ending in a game id watches that one game. A round URL watches
-  every game in the round.
-- A normal `https://lichess.org/<gameId>` URL works too.
-- Add `--open` to open the board immediately instead of asking.
+- Press 🔔 on the games you care about. From then on, every new move in those games
+  pops up a desktop dialog ("29. Nb6+ · Black to move. What would you play?"), even
+  with the browser closed. **Open board** jumps to that game.
+- The games you've belled are saved in `follow.json`, so restarting the watcher keeps
+  them.
+- `--open` opens the board immediately instead of asking. `--print` only logs moves
+  in the terminal.
+- You can also pass links on the command line: `python3 watcher.py <url> ...`.
 - Popups need macOS. On other systems the moves are printed in the terminal.
 
-To use only the web app:
-
-```bash
-python3 -m http.server 8765
-```
-
-Then open http://localhost:8765 and paste a URL.
+The page also works without the watcher (`python3 -m http.server 8765`). Then 🔔 uses
+browser notifications, which only work while the tab is open.
 
 ## What the web app does
 
-- **Many games at once.** Paste any number of broadcast rounds or game URLs. 🔔 on
-  a game sends a browser notification for each of its moves.
+- **Many games at once.** Paste any number of broadcast rounds or game URLs. Games
+  that haven't started show their start time.
 - **Guess the move.** On the live position, drag the move you expect. It locks. When
   the real move arrives you see ✓/✗, plus the Lichess cloud eval and best move
   (when Lichess has one).

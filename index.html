@@ -66,6 +66,7 @@ const save = () => { LS.set('lb:guesses', guesses); LS.set('lb:bells', bells); L
 const games = new Map();   // id -> {id, src, name, fens[], ucis[], sans[], result, over, unseen, ri}
 const ctrls = new Map();   // source id -> AbortController
 let cur = null, pinned = false, pinPly = 0, explore = null, feedback = null, wantGame = null, orient = 'white';
+let watcherOn = false; // true when served by watcher.py, which shows desktop popups for belled games
 
 // ---------- input ----------
 const ID8 = /^[A-Za-z0-9]{8}$/;
@@ -89,8 +90,8 @@ $('#url').onkeydown = e => e.key === 'Enter' && $('#add').click();
 $('#notif').onclick = async () => { await Notification.requestPermission(); renderNotif(); };
 const renderNotif = () => {
   const p = 'Notification' in window ? Notification.permission : 'denied';
-  $('#notif').textContent = p === 'granted' ? 'Notifications on' : p === 'denied' ? 'Notifications blocked' : 'Enable notifications';
-  $('#notif').classList.toggle('on', p === 'granted');
+  $('#notif').textContent = watcherOn ? 'Desktop popups on' : p === 'granted' ? 'Notifications on' : p === 'denied' ? 'Notifications blocked' : 'Enable notifications';
+  $('#notif').classList.toggle('on', watcherOn || p === 'granted');
 };
 
 // ---------- streaming: one long-lived HTTP response per source, Lichess pushes as moves happen ----------
@@ -114,6 +115,16 @@ function watch(src) {
           if (r.ok) (await r.text()).split('\n\n\n').forEach(t => onPgn(t, src));
           const firstOfRound = [...games.values()].find(g => g.src === src);
           if (!cur && firstOfRound && !wantGame) select(firstOfRound.id);
+          try { // round name and start time
+            const info = await (await fetch(`${API}/api/broadcast/-/-/${src.id}`, { signal: ac.signal })).json();
+            src.name = `${info.tour?.name || ''} · ${info.round?.name || ''}`; src.startsAt = info.round?.startsAt;
+            renderSources(); if (cur) renderPanel(); renderList();
+          } catch {}
+        }
+        const untilStart = (src.startsAt || 0) - Date.now(); // the stream is silent before the round starts
+        if (untilStart > 60000 && ![...games.values()].some(g => g.src === src && g.ucis.length)) {
+          setLabel(src, `starts ${fmtStart(src.startsAt)}`); first = false;
+          return setTimeout(run, Math.min(untilStart - 30000, 6 * 3600e3));
         }
         let buf = '';
         await readStream(`${API}/api/stream/broadcast/round/${src.id}.pgn`, ac.signal, t => {
@@ -194,7 +205,7 @@ const toUci = m => m.from + m.to + (m.promotion || '');
 
 function update(g, ucis, sans, fens) {
   const added = ucis.length - g.ucis.length;
-  if (added <= 0 && ucis.join() === g.ucis.join()) { g.loaded = true; return renderList(); }
+  if (added <= 0 && ucis.join() === g.ucis.join()) { g.loaded = true; pick(g); return renderList(); } // e.g. a game that hasn't started
   g.ucis = ucis; g.sans = sans; g.fens = fens;
   const fresh = added > 0 && g.loaded && Date.now() > g.src.quiet;
   g.loaded = true;
@@ -202,11 +213,19 @@ function update(g, ucis, sans, fens) {
   if (fresh && g.id !== cur) g.unseen += added;
   reveal(g);
   if (fresh) notify(g);
-  if (g.id === wantGame) { wantGame = null; select(g.id); }
-  else if (!cur && !wantGame) select(g.id);
-  else if (g.id === cur) { if (!pinned) feedback = feedback?.gid === g.id ? feedback : null; draw(); renderPanel(); }
+  if (!pick(g) && g.id === cur) { draw(); renderPanel(); }
   renderList();
 }
+// Open the game the pasted link pointed at, or the first game we hear about.
+function pick(g) {
+  if (g.id === wantGame) { wantGame = null; select(g.id); return true; }
+  if (!cur && !wantGame) { select(g.id); return true; }
+  return false;
+}
+const fmtStart = ts => {
+  const mins = Math.round((ts - Date.now()) / 60000), when = new Date(ts).toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' });
+  return mins > 0 ? `${when} (in ${mins >= 60 ? `${Math.floor(mins / 60)}h ` : ''}${mins % 60}m)` : when;
+};
 
 // ---------- guesses ----------
 function reveal(g) {
@@ -233,7 +252,7 @@ async function fetchEval(g, p) {
 const moveNo = p => p % 2 ? `${(p + 1) / 2}…` : `${p / 2 + 1}.`;
 
 function notify(g) {
-  if (!bells[g.id] || !('Notification' in window) || Notification.permission !== 'granted') return;
+  if (watcherOn || !bells[g.id] || !('Notification' in window) || Notification.permission !== 'granted') return;
   if (!document.hidden && g.id === cur) return;
   const p = g.sans.length - 1;
   const n = new Notification(g.name, { body: `${moveNo(p)} ${g.sans[p]}${g.over ? '' : ' — what would you play now?'}`, tag: g.id, renotify: true });
@@ -324,7 +343,7 @@ document.addEventListener('keydown', e => {
 
 // ---------- UI ----------
 function renderSources() {
-  $('#sources').innerHTML = sources.map((s, i) => `<span>${s.kind} ${s.id} · ${s.label || ''}<b data-i="${i}" title="Stop watching">✕</b></span>`).join('');
+  $('#sources').innerHTML = sources.map((s, i) => `<span>${esc(s.name || `${s.kind} ${s.id}`)} · ${s.label || ''}<b data-i="${i}" title="Stop watching">✕</b></span>`).join('');
   $('#sources').querySelectorAll('b').forEach(b => b.onclick = () => {
     const s = sources.splice(+b.dataset.i, 1)[0]; ctrls.get(s.id)?.abort();
     for (const [id, g] of games) if (g.src.id === s.id) games.delete(id);
@@ -335,12 +354,18 @@ function renderList() {
   const el = $('#games'), list = [...games.values()];
   if (!list.length) return;
   el.innerHTML = list.map(g => `<div class="g ${g.id === cur ? 'cur' : ''}" data-id="${g.id}">
-    <div class="n">${esc(g.name)}<small>${g.over ? g.result : `${g.ucis.length} plies · live`}</small></div>
+    <div class="n">${esc(g.name)}<small>${g.over ? g.result : g.ucis.length ? `${g.ucis.length} plies · live`
+      : g.src.startsAt > Date.now() ? `starts ${fmtStart(g.src.startsAt)}` : 'not started'}</small></div>
     ${g.unseen ? `<span class="badge">${g.unseen}</span>` : ''}
-    <button class="bell ${bells[g.id] ? 'on' : ''}" title="Notify on every move">🔔</button></div>`).join('');
+    <button class="bell ${bells[g.id] ? 'on' : ''}" title="Pop up on every move">🔔</button></div>`).join('');
   el.querySelectorAll('.g').forEach(r => r.onclick = e => {
     const id = r.dataset.id;
-    if (e.target.closest('.bell')) { bells[id] = !bells[id]; save(); if (bells[id]) $('#notif').click(); return renderList(); }
+    if (e.target.closest('.bell')) {
+      const g = games.get(id);
+      if (bells[id]) delete bells[id];
+      else bells[id] = { name: g.name, url: g.src.kind === 'round' ? `https://lichess.org/broadcast/-/-/${g.src.id}/${id}` : `https://lichess.org/${id}` };
+      save(); syncWatcher(); if (bells[id] && !watcherOn) $('#notif').click(); return renderList();
+    }
     select(id);
   });
   const n = list.reduce((a, g) => a + g.unseen, 0);
@@ -361,7 +386,9 @@ function renderPanel() {
       ${ahead > 0 ? `<br><span class="bad">Live is ${ahead} move${ahead > 1 ? 's' : ''} ahead</span>` : ''}
       <div class="row" style="margin-top:6px"><button id="reset">Reset line</button><button id="catch" class="on">Catch up</button></div>`;
   } else if (g.over) status = `<b>Game over: ${g.result}</b>`;
-  else status = mine ? `Your guess <b>${mine.san}</b> is locked. Waiting for ${side}…` : `<b>${side} to move.</b> Drag the move you think they'll play.`;
+  else if (!ply && g.src.startsAt > Date.now()) status = `<b>Not started yet.</b> Starts ${fmtStart(g.src.startsAt)}.
+    ${mine ? `Your first-move guess <b>${mine.san}</b> is locked.` : 'You can already guess the first move.'}`;
+  else status = mine ?`Your guess <b>${mine.san}</b> is locked. Waiting for ${side}…` : `<b>${side} to move.</b> Drag the move you think they'll play.`;
   const fb = feedback && guesses[g.id]?.[feedback.ply], f = fb && `<div class="card">
       <div class="${fb.match ? 'ok' : 'bad'}"><b>${fb.match ? '✓ Match' : '✗ Miss'}</b> — ${moveNo(feedback.ply)} played <b>${fb.actualSan}</b>${fb.match ? '' : `, you said <b>${fb.san}</b>`}</div>
       ${fb.eval ? `<div class="dim">Cloud eval before the move: ${fb.eval} · best <b>${fb.bestSan}</b></div>` : ''}</div>`;
@@ -382,6 +409,15 @@ function renderPanel() {
 }
 
 document.addEventListener('visibilitychange', () => { if (!document.hidden && cur) { games.get(cur).unseen = 0; renderList(); } });
+// Tell watcher.py (if it's what served this page) which games have the bell on.
+async function syncWatcher() {
+  if (!watcherOn) return;
+  const list = Object.entries(bells).filter(([, b]) => b?.url).map(([id, b]) => ({ id, ...b }));
+  try { watcherOn = (await fetch('/follow', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(list) })).ok; }
+  catch { watcherOn = false; }
+  renderNotif();
+}
+fetch('/follow').then(r => { watcherOn = r.ok && r.headers.get('Content-Type') === 'application/json'; syncWatcher(); }).catch(() => {});
 renderNotif(); renderSources(); renderPanel();
 sources.forEach(watch);
 // Deep links: watcher.py (and shared links) open the app as /#<lichess url> to jump straight to a game.
