@@ -124,7 +124,7 @@ def on_moves(gid, sid, name, sans, link, over, silent):
     label = f"{p // 2 + 1}{'.' if p % 2 == 0 else '...'} {sans[-1]}"
     side = "White" if n % 2 == 0 else "Black"
     print(time.strftime("%H:%M:%S"), name, label)
-    text = f"{name}\n{label}\n\n" + ("Game over." if over else f"{side} to move. Find the best move.")
+    text = f"{name}\n{label}\n\n" + ("Game over." if over else f"{side} to move. What would you play?")
     popup(gid, text, APP + "#" + urllib.parse.quote(link, safe=""))
 
 
