@@ -1,0 +1,7 @@
+#!/bin/sh
+# Runs the tests before every commit. To skip once: git commit --no-verify
+if ! ./test.sh; then
+  echo
+  echo "Tests failed, so nothing was committed. Fix them, or skip once with: git commit --no-verify"
+  exit 1
+fi

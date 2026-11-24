@@ -1,0 +1,6 @@
+{
+  "name": "your-move",
+  "private": true,
+  "type": "module",
+  "scripts": { "test": "./test.sh" }
+}

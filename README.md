@@ -29,3 +29,12 @@ straight to the position.
   with ◀ ▶, and try your own lines.
 - Live clocks and start times. At the end of a game you get your moves next to
   the players'.
+
+## Tests
+
+```bash
+./test.sh
+```
+
+Runs offline in a few seconds. It runs before every commit too, once you turn on
+the hook in a fresh clone with `git config core.hooksPath .githooks`.

@@ -14,7 +14,7 @@ opens the app on that game.
 The games you follow are saved in follow.json next to this file, so they survive restarts.
 Standard library only. Desktop popups need macOS; elsewhere moves are printed.
 """
-import functools, http.server, json, os, re, subprocess, sys, threading, time
+import functools, http.server, json, os, re, socket, subprocess, sys, threading, time
 import urllib.parse, urllib.request
 
 PORT = int(os.environ.get("PORT", 8765))
@@ -76,7 +76,10 @@ def set_follows(new):
     print("Following:", ", ".join(names) if names else "nothing yet - turn on a bell in the app")
 
 
-# ---------- web server: the app, plus /follow for the app to say which games are belled ----------
+# ---------- web server: the app, plus /follow ----------
+# The watcher's list of followed games is the one that counts. GET /follow shows it to the page;
+# POST /follow changes ONE game: {"add": {"id", "url", "name"}} or {"remove": id}. There is no way to
+# replace the whole list, so a second browser (with its own, maybe empty, bells) can't wipe it.
 class Handler(http.server.SimpleHTTPRequestHandler):
     def __init__(self, *a, **kw):
         super().__init__(*a, directory=HERE, **kw)
@@ -93,13 +96,25 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         # JSON only: a cross-site page can't send this without a CORS preflight we never approve.
         if self.path != "/follow" or self.headers.get("Content-Type") != "application/json":
             return self.reply(400, {"error": "POST JSON to /follow"})
+        usage = {"error": 'expected {"add": {"id", "url", "name"}} or {"remove": id}'}
         try:
             body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
-            from_app = {str(g["id"]): {"url": str(g["url"]), "name": str(g.get("name", ""))} for g in body}
-        except (ValueError, KeyError, TypeError):
-            return self.reply(400, {"error": "expected [{id, url, name}]"})
-        new = {k: v for k, v in follows.items() if v.get("cli")}  # URLs given on the command line stay
-        new.update(from_app)
+        except ValueError:
+            return self.reply(400, usage)
+        if not isinstance(body, dict):
+            return self.reply(400, usage)
+        with lock:
+            new = dict(follows)
+        if isinstance(body.get("add"), dict):
+            g = body["add"]
+            gid, url = str(g.get("id", "")), str(g.get("url", ""))
+            if not gid or not parse(url):
+                return self.reply(400, usage)
+            new[gid] = {"url": url, "name": str(g.get("name", ""))}
+        elif "remove" in body:
+            new.pop(str(body["remove"]), None)
+        else:
+            return self.reply(400, usage)
         set_follows(new)
         self.reply(200, follows)
 
@@ -243,6 +258,20 @@ def watch_game(gid, stop):
             running.pop(gid)
 
 
+def port_in_use(port):
+    """'localhost' can mean 127.0.0.1 or ::1, and another server may hold either one,
+    so check both before starting. Returns the busy address, or None."""
+    for family, host in ((socket.AF_INET, "127.0.0.1"), (socket.AF_INET6, "::1")):
+        try:
+            with socket.socket(family, socket.SOCK_STREAM) as s:
+                s.settimeout(0.5)
+                if s.connect_ex((host, port)) == 0:
+                    return host
+        except OSError:  # e.g. IPv6 disabled
+            pass
+    return None
+
+
 def main():
     try:
         with open(FOLLOW_FILE) as fh:  # CLI follows from a previous run don't come back unless named again
@@ -255,10 +284,15 @@ def main():
             sys.exit(f"Not a Lichess broadcast or game URL: {u}")
         kind, sid, gid = got
         saved[gid or f"{sid}:*"] = {"url": u, "name": "", "cli": True}
+    busy = port_in_use(PORT)
+    if busy:
+        sys.exit(f"Port {PORT} is already in use on {busy}, so the browser might open that instead of this app.\n"
+                 f"Stop it first (e.g. a 'python3 -m http.server' or another watcher), then retry.\n"
+                 f"To see what it is: lsof -nP -iTCP:{PORT} -sTCP:LISTEN")
     try:
         srv = http.server.ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
-    except OSError:
-        sys.exit(f"Port {PORT} is busy. Stop whatever is using it (e.g. python3 -m http.server) and retry.")
+    except OSError as e:
+        sys.exit(f"Can't use port {PORT}: {e}")
     set_follows(saved)
     print(f"Open {APP} and press the bell on any game to get desktop popups for it.")
     try:

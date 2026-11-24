@@ -65,7 +65,8 @@
   <section id="panel"></section>
 </main>
 <script type="module">
-import { Chess } from 'https://cdn.jsdelivr.net/npm/chess.js@1.0.0/+esm';
+import { Chess, parseInput, addSource, dropGame, follows, pgnGameId, readPgn, readGameInfo, readTick,
+  toUci, revealGuesses, toggleBell, bellsFromWatcher, moveNo, fmtClock, fmtStart } from './lib.js';
 import { Chessground } from 'https://cdn.jsdelivr.net/npm/chessground@9.1.1/+esm';
 
 const API = 'https://lichess.org';
@@ -76,7 +77,7 @@ const LS = {
 };
 let sources = LS.get('lb:sources', []);   // [{kind:'round'|'game', id, label}]
 const guesses = LS.get('lb:guesses', {}); // gameId -> {ply: {uci, san, actual, actualSan, match, eval, bestSan}}
-const bells = LS.get('lb:bells', {});     // gameId -> true: notify on every move
+const bells = LS.get('lb:bells', {});     // gameId -> {name, url}: pop up on every move (the watcher's list when it runs)
 const save = () => { LS.set('lb:guesses', guesses); LS.set('lb:bells', bells); LS.set('lb:sources', sources); };
 
 const games = new Map();   // id -> {id, src, name, fens[], ucis[], sans[], result, over, unseen, ri}
@@ -85,26 +86,15 @@ let cur = null, pinned = false, pinPly = 0, explore = null, feedback = null, wan
 let watcherOn = false; // true when served by watcher.py, which shows desktop popups for belled games
 
 // ---------- input ----------
-const ID8 = /^[A-Za-z0-9]{8}$/;
-function parseInput(s) {
-  s = s.trim(); let u;
-  try { u = new URL(s); } catch { return ID8.test(s) ? { kind: 'round', id: s } : null; }
-  const p = u.pathname.split('/').filter(Boolean), b = p.indexOf('broadcast');
-  if (b >= 0) return ID8.test(p[b + 3] || '') ? { kind: 'round', id: p[b + 3], gameId: p[b + 4] } : null;
-  if (/^[A-Za-z0-9]{8,12}$/.test(p[0] || '')) return { kind: 'game', id: p[0].slice(0, 8) };
-  return null;
-}
 $('#add').onclick = () => {
   const src = parseInput($('#url').value);
   if (!src) return say('That doesn\'t look like a Lichess broadcast or game link. Example: https://lichess.org/broadcast/…/…/xLgOJ6cb');
   say('');
-  wantGame = src.gameId || (src.kind === 'game' ? src.id : null);
-  // A link to one game follows just that game; a link to the round follows every game in it.
-  // Either way it's one Lichess connection per round, with `only` listing the games to show.
-  const ex = sources.find(x => x.id === src.id);
-  if (!ex) { sources.push({ kind: src.kind, id: src.id, only: src.gameId ? [src.gameId] : null }); save(); watch(sources.at(-1)); }
-  else if (ex.only && !src.gameId) { ex.only = null; restart(ex); }
-  else if (ex.only && !ex.only.includes(src.gameId)) { ex.only.push(src.gameId); restart(ex); }
+  // One Lichess connection per round either way; addSource decides which of its games to show.
+  const r = addSource(sources, src);
+  wantGame = r.wantGame;
+  if (r.action === 'new') { save(); watch(r.source); }
+  else if (r.action === 'restart') restart(r.source);
   else if (wantGame && games.has(wantGame)) select(wantGame);
   $('#url').value = ''; renderSources();
 };
@@ -192,49 +182,23 @@ function getGame(id, src, name) {
   return games.get(id);
 }
 function onPgn(text, src) {
-  if (!text.includes('[')) return;
-  const h = {}; for (const m of text.matchAll(/^\[(\w+) "(.*)"\]\s*$/gm)) h[m[1]] = m[2];
-  const id = (h.GameURL || '').split('/').pop() || `${src.id}:${h.White}-${h.Black}`;
-  if (src.only && !src.only.includes(id)) return; // a game in this round you're not following
-  const c = new Chess(); try { c.loadPgn(text); } catch { return; }
-  const r = new Chess(h.FEN || undefined), fens = [r.fen()], ucis = [], sans = [], clk = {};
-  const notes = new Map(c.getComments().map(x => [x.fen, x.comment])); // "[%clk 1:30:42]" = mover's time left
-  for (const m of c.history({ verbose: true })) {
-    r.move(m.san); fens.push(r.fen()); ucis.push(m.from + m.to + (m.promotion || '')); sans.push(m.san);
-    const t = /%clk (\d+):(\d+):(\d+(?:\.\d+)?)/.exec(notes.get(r.fen()) || '');
-    if (t) clk[m.color] = t[1] * 3600 + t[2] * 60 + +t[3];
-  }
-  const g = getGame(id, src, `${h.White} – ${h.Black}`);
-  g.clk = clk;
-  g.result = h.Result || '*'; g.over = g.result !== '*';
-  update(g, ucis, sans, fens);
+  const id = pgnGameId(text, src.id);
+  if (!id || !follows(src, id)) return; // not a game, or a game in this round you're not following
+  const p = readPgn(text, src.id); if (!p) return;
+  const g = getGame(id, src, p.name);
+  g.clk = p.clk; g.result = p.result; g.over = p.over;
+  update(g, p.ucis, p.sans, p.fens);
 }
 function onGameHead(g, o) {
-  const pl = c => o.players?.[c]?.user?.name || o.players?.[c]?.aiLevel && `Stockfish ${o.players[c].aiLevel}` || c;
-  g.name = `${pl('white')} – ${pl('black')}`;
-  const st = o.status?.name || o.status;
-  if (st && !['created', 'started'].includes(st)) {
-    g.over = true; g.result = o.winner === 'white' ? '1-0' : o.winner === 'black' ? '0-1' : '½-½';
-    if (g.id === cur) { draw(); renderPanel(); }
-  }
+  const info = readGameInfo(o);
+  g.name = info.name;
+  if (info.over) { g.over = true; g.result = info.result; if (g.id === cur) { draw(); renderPanel(); } }
   renderList();
 }
 function onTick(g, o) {
-  if (!o.fen) return;
-  if (o.wc != null) g.clk = { w: o.wc, b: o.bc };
-  if (!o.lm) { if (!g.ucis.length) g.fens = [o.fen]; g.ri = 0; return; }
-  if (g.ri++ < g.ucis.length) return; // already have this move from an earlier connection
-  const m = playUci(g.fens.at(-1), o.lm);
-  update(g, [...g.ucis, m ? toUci(m) : o.lm], [...g.sans, m ? m.san : o.lm], [...g.fens, o.fen]);
+  const next = readTick(g, o);
+  if (next) update(g, next.ucis, next.sans, next.fens);
 }
-// Lichess may write castling as king-takes-rook (e1h1); chess.js wants e1g1.
-const CASTLE = { e1h1: 'e1g1', e1a1: 'e1c1', e8h8: 'e8g8', e8a8: 'e8c8' };
-function playUci(fen, u) {
-  const c = new Chess(fen);
-  for (const x of [u, CASTLE[u.slice(0, 4)]]) if (x) try { return c.move({ from: x.slice(0, 2), to: x.slice(2, 4), promotion: x[4] }); } catch {}
-  return null;
-}
-const toUci = m => m.from + m.to + (m.promotion || '');
 
 function update(g, ucis, sans, fens) {
   const added = ucis.length - g.ucis.length;
@@ -255,22 +219,13 @@ function pick(g) {
   if (!cur && !wantGame) { select(g.id); return true; }
   return false;
 }
-const fmtStart = ts => {
-  const mins = Math.round((ts - Date.now()) / 60000), when = new Date(ts).toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' });
-  return mins > 0 ? `${when} (in ${mins >= 60 ? `${Math.floor(mins / 60)}h ` : ''}${mins % 60}m)` : when;
-};
 
 // ---------- guesses ----------
 function reveal(g) {
-  const gs = guesses[g.id]; if (!gs) return;
-  for (const [p, x] of Object.entries(gs)) {
-    if (x.actual || +p >= g.ucis.length) continue;
-    Object.assign(x, { actual: g.ucis[p], actualSan: g.sans[p], match: x.uci === g.ucis[p] });
-    if (g.id === cur) feedback = { gid: g.id, ply: +p };
-  }
-  save();
+  const shown = revealGuesses(guesses[g.id], g.ucis, g.sans);
+  if (shown.length && g.id === cur) feedback = { gid: g.id, ply: shown.at(-1) };
+  if (shown.length) save();
 }
-const moveNo = p => p % 2 ? `${(p + 1) / 2}…` : `${p / 2 + 1}.`;
 
 function notify(g) {
   if (watcherOn || !bells[g.id] || !('Notification' in window) || Notification.permission !== 'granted') return;
@@ -322,11 +277,6 @@ function drawClocks() {
   const [top, bot] = orient === 'white' ? [['b', bn], ['w', wn]] : [['w', wn], ['b', bn]];
   paint($('#clkTop'), ...top); paint($('#clkBot'), ...bot);
 }
-function fmtClock(t) {
-  if (t == null) return '–:––';
-  t = Math.floor(t); const h = Math.floor(t / 3600), m = Math.floor(t / 60) % 60, s = String(t % 60).padStart(2, '0');
-  return h ? `${h}:${String(m).padStart(2, '0')}:${s}` : `${m}:${s}`;
-}
 setInterval(drawClocks, 500);
 const uciSq = u => u ? [u.slice(0, 2), u.slice(2, 4)] : undefined;
 function onUserMove(o, d) {
@@ -375,10 +325,10 @@ function renderSources() {
 // Stop following one game. For a whole round, the rest of its games stay.
 function drop(g) {
   const s = g.src;
-  delete bells[g.id]; syncWatcher();
-  if (s.kind === 'round') s.only = (s.only || [...games.values()].filter(x => x.src === s).map(x => x.id)).filter(id => id !== g.id);
+  if (bells[g.id]) tellWatcher(toggleBell(bells, g));
+  const shown = [...games.values()].filter(x => x.src === s).map(x => x.id);
   games.delete(g.id);
-  if (s.kind === 'game' || !s.only.length) { sources.splice(sources.indexOf(s), 1); ctrls.get(s.id)?.abort(); }
+  if (dropGame(sources, s, g.id, shown)) ctrls.get(s.id)?.abort();
   if (cur === g.id) { cur = null; const next = games.values().next().value; if (next) select(next.id); }
   save(); renderSources(); renderList(); renderPanel();
 }
@@ -395,10 +345,8 @@ function renderList() {
     const id = r.dataset.id;
     if (e.target.closest('.drop')) return drop(games.get(id));
     if (e.target.closest('.bell')) {
-      const g = games.get(id);
-      if (bells[id]) delete bells[id];
-      else bells[id] = { name: g.name, url: g.src.kind === 'round' ? `https://lichess.org/broadcast/-/-/${g.src.id}/${id}` : `https://lichess.org/${id}` };
-      save(); syncWatcher(); if (bells[id] && !watcherOn) $('#notif').click(); return renderList();
+      tellWatcher(toggleBell(bells, games.get(id)));
+      save(); if (bells[id] && !watcherOn) $('#notif').click(); return renderList();
     }
     select(id);
   });
@@ -446,16 +394,30 @@ function renderPanel() {
   if (pinned) { $('#catch').onclick = () => setPinned(false); $('#reset').onclick = () => { explore = new Chess(g.fens[pinPly]); draw(); }; }
 }
 
-document.addEventListener('visibilitychange', () => { if (!document.hidden && cur) { games.get(cur).unseen = 0; renderList(); } });
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) return;
+  if (cur) { games.get(cur).unseen = 0; renderList(); }
+  loadWatcherFollows(); // pick up 🔔 changes made in another browser
+});
 // Tell watcher.py (if it's what served this page) which games have the bell on.
-async function syncWatcher() {
-  if (!watcherOn) return;
-  const list = Object.entries(bells).filter(([, b]) => b?.url).map(([id, b]) => ({ id, ...b }));
-  try { watcherOn = (await fetch('/follow', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(list) })).ok; }
-  catch { watcherOn = false; }
+// When watcher.py served this page, its list of followed games is the one that counts: show it here,
+// and send it one change at a time ({add} or {remove}), never a whole list that could wipe another browser's.
+async function loadWatcherFollows() {
+  try {
+    const r = await fetch('/follow');
+    watcherOn = r.ok && r.headers.get('Content-Type') === 'application/json';
+    if (watcherOn) { bellsFromWatcher(bells, await r.json()); save(); renderList(); }
+  } catch { watcherOn = false; }
   renderNotif();
 }
-fetch('/follow').then(r => { watcherOn = r.ok && r.headers.get('Content-Type') === 'application/json'; syncWatcher(); }).catch(() => {});
+async function tellWatcher(change) {
+  if (!watcherOn) return;
+  try {
+    const r = await fetch('/follow', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(change) });
+    if (r.ok) { bellsFromWatcher(bells, await r.json()); save(); renderList(); } // show what the watcher now has
+  } catch { watcherOn = false; renderNotif(); }
+}
+loadWatcherFollows();
 window.appReady = true;
 renderNotif(); renderSources(); renderPanel();
 sources.forEach(watch);
