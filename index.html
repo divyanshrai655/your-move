@@ -1,0 +1,396 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Your Move</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/chessground@9.1.1/assets/chessground.base.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/chessground@9.1.1/assets/chessground.brown.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/chessground@9.1.1/assets/chessground.cburnett.css">
+<style>
+  :root { --bg:#16181d; --panel:#1f232b; --line:#2e333d; --fg:#e6e6e6; --dim:#9aa1ad; --ok:#4caf50; --bad:#e5534b; --acc:#d9a441; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:14px/1.45 system-ui,sans-serif; }
+  header { display:flex; gap:8px; padding:10px 16px; border-bottom:1px solid var(--line); flex-wrap:wrap; align-items:center; }
+  header input { flex:1; min-width:220px; padding:8px; background:var(--panel); color:var(--fg); border:1px solid var(--line); border-radius:6px; }
+  button { background:var(--panel); color:var(--fg); border:1px solid var(--line); border-radius:6px; padding:7px 11px; cursor:pointer; }
+  button:hover { border-color:var(--acc); } button.on { background:var(--acc); color:#111; border-color:var(--acc); }
+  #sources { display:flex; gap:6px; flex-wrap:wrap; padding:6px 16px; color:var(--dim); font-size:12px; }
+  #sources span { border:1px solid var(--line); border-radius:12px; padding:2px 8px; } #sources b { cursor:pointer; margin-left:6px; }
+  main { display:grid; grid-template-columns:250px auto 1fr; gap:16px; padding:12px 16px; align-items:start; }
+  /* narrow screens: board first, then the panel, then a short scrollable game list */
+  @media (max-width:900px) { main { grid-template-columns:1fr; } #games { order:3; max-height:40vh; } #panel { order:2; } }
+  #games { max-height:80vh; overflow:auto; border:1px solid var(--line); border-radius:8px; }
+  .g { display:flex; align-items:center; gap:6px; padding:7px 9px; border-bottom:1px solid var(--line); cursor:pointer; }
+  .g.cur { background:var(--panel); box-shadow:inset 3px 0 var(--acc); } .g .n { flex:1; font-size:13px; }
+  .g small { color:var(--dim); display:block; } .badge { background:var(--acc); color:#111; border-radius:9px; padding:0 6px; font-size:11px; font-weight:700; }
+  .bell { padding:2px 6px; font-size:12px; opacity:.45; } .bell.on { opacity:1; background:transparent; color:var(--acc); }
+  #board { width:min(92vw,520px); height:min(92vw,520px); }
+  .clk { display:flex; justify-content:space-between; align-items:center; width:min(92vw,520px); margin:6px 0; padding:5px 10px;
+    background:var(--panel); border:1px solid var(--line); border-radius:6px; font-variant-numeric:tabular-nums; }
+  .clk b { font-size:20px; } .clk.run { border-color:var(--acc); } .clk.run b { color:var(--acc); } .clk.low b { color:var(--bad); }
+  #panel { display:flex; flex-direction:column; gap:10px; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:10px 12px; }
+  .ok { color:var(--ok); } .bad { color:var(--bad); } .dim { color:var(--dim); }
+  table { border-collapse:collapse; width:100%; font-size:13px; } td,th { padding:3px 6px; border-bottom:1px solid var(--line); text-align:left; }
+  .row { display:flex; gap:6px; flex-wrap:wrap; }
+</style>
+</head>
+<body>
+<header>
+  <input id="url" placeholder="Paste a Lichess broadcast round URL or a lichess.org game URL">
+  <button id="add">Watch</button>
+  <button id="notif">Enable notifications</button>
+</header>
+<div id="sources"></div>
+<main>
+  <aside id="games"><div class="g dim">No games yet — paste a URL above.</div></aside>
+  <div><div class="clk" id="clkTop"></div><div id="board"></div><div class="clk" id="clkBot"></div></div>
+  <section id="panel"></section>
+</main>
+<script type="module">
+import { Chess } from 'https://cdn.jsdelivr.net/npm/chess.js@1.0.0/+esm';
+import { Chessground } from 'https://cdn.jsdelivr.net/npm/chessground@9.1.1/+esm';
+
+const API = 'https://lichess.org';
+const $ = s => document.querySelector(s);
+const LS = {
+  get(k, d) { try { return JSON.parse(localStorage.getItem(k)) ?? d; } catch { return d; } },
+  set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} },
+};
+let sources = LS.get('lb:sources', []);   // [{kind:'round'|'game', id, label}]
+const guesses = LS.get('lb:guesses', {}); // gameId -> {ply: {uci, san, actual, actualSan, match, eval, bestSan}}
+const bells = LS.get('lb:bells', {});     // gameId -> true: notify on every move
+const save = () => { LS.set('lb:guesses', guesses); LS.set('lb:bells', bells); LS.set('lb:sources', sources); };
+
+const games = new Map();   // id -> {id, src, name, fens[], ucis[], sans[], result, over, unseen, ri}
+const ctrls = new Map();   // source id -> AbortController
+let cur = null, pinned = false, pinPly = 0, explore = null, feedback = null, wantGame = null, orient = 'white';
+
+// ---------- input ----------
+const ID8 = /^[A-Za-z0-9]{8}$/;
+function parseInput(s) {
+  s = s.trim(); let u;
+  try { u = new URL(s); } catch { return ID8.test(s) ? { kind: 'round', id: s } : null; }
+  const p = u.pathname.split('/').filter(Boolean), b = p.indexOf('broadcast');
+  if (b >= 0) return ID8.test(p[b + 3] || '') ? { kind: 'round', id: p[b + 3], gameId: p[b + 4] } : null;
+  if (/^[A-Za-z0-9]{8,12}$/.test(p[0] || '')) return { kind: 'game', id: p[0].slice(0, 8) };
+  return null;
+}
+$('#add').onclick = () => {
+  const src = parseInput($('#url').value);
+  if (!src) return alert('Could not read a broadcast round or game id from that URL.');
+  wantGame = src.gameId || (src.kind === 'game' ? src.id : null);
+  if (!sources.some(x => x.id === src.id)) { sources.push({ kind: src.kind, id: src.id }); save(); watch(sources.at(-1)); }
+  else if (wantGame && games.has(wantGame)) select(wantGame);
+  $('#url').value = ''; renderSources();
+};
+$('#url').onkeydown = e => e.key === 'Enter' && $('#add').click();
+$('#notif').onclick = async () => { await Notification.requestPermission(); renderNotif(); };
+const renderNotif = () => {
+  const p = 'Notification' in window ? Notification.permission : 'denied';
+  $('#notif').textContent = p === 'granted' ? 'Notifications on' : p === 'denied' ? 'Notifications blocked' : 'Enable notifications';
+  $('#notif').classList.toggle('on', p === 'granted');
+};
+
+// ---------- streaming: one long-lived HTTP response per source, Lichess pushes as moves happen ----------
+async function readStream(url, signal, onText) {
+  const r = await fetch(url, { signal });
+  if (r.status === 429) throw Object.assign(new Error('rate limited'), { wait: 61000 });
+  if (!r.ok) throw new Error('HTTP ' + r.status);
+  const rd = r.body.pipeThrough(new TextDecoderStream()).getReader();
+  for (;;) { const { value, done } = await rd.read(); if (done) return; onText(value); }
+}
+function watch(src) {
+  const ac = new AbortController(); ctrls.set(src.id, ac);
+  let delay = 3000, first = true;
+  const run = async () => {
+    if (ac.signal.aborted) return;
+    let got = false; src.quiet = Date.now() + 2500; // replayed history on (re)connect is not "new"
+    try {
+      if (src.kind === 'round') {
+        if (first) { // the stream is silent for rounds that are over, so load a snapshot first
+          const r = await fetch(`${API}/api/broadcast/round/${src.id}.pgn`, { signal: ac.signal });
+          if (r.ok) (await r.text()).split('\n\n\n').forEach(t => onPgn(t, src));
+          const firstOfRound = [...games.values()].find(g => g.src === src);
+          if (!cur && firstOfRound && !wantGame) select(firstOfRound.id);
+        }
+        let buf = '';
+        await readStream(`${API}/api/stream/broadcast/round/${src.id}.pgn`, ac.signal, t => {
+          got = true; buf += t; const parts = buf.split('\n\n\n'); buf = parts.pop(); parts.forEach(p => onPgn(p, src));
+        });
+        if (buf.trim()) onPgn(buf, src);
+        const mine = [...games.values()].filter(g => g.src === src);
+        if (mine.length && mine.every(g => g.over)) return setLabel(src, 'finished');
+      } else {
+        let buf = '';
+        const g = getGame(src.id, src, src.id); g.ri = 0;
+        await readStream(`${API}/api/stream/game/${src.id}`, ac.signal, t => {
+          got = true; buf += t; const lines = buf.split('\n'); buf = lines.pop();
+          // game-info objects (with "id") come first and again at the end with status/winner; the rest are moves
+          for (const l of lines) if (l.trim()) { const o = JSON.parse(l); o.id ? onGameHead(g, o) : onTick(g, o); }
+        });
+        if (g.over) return setLabel(src, 'finished');
+      }
+      setLabel(src, got ? 'reconnecting' : 'waiting for moves');
+      delay = got ? 3000 : Math.min(delay * 2, 60000);
+    } catch (e) {
+      if (ac.signal.aborted) return;
+      delay = e.wait || Math.min(delay * 2, 60000); setLabel(src, e.message);
+    }
+    first = false; setTimeout(run, delay);
+  };
+  setLabel(src, 'live'); run();
+}
+const setLabel = (src, l) => { src.label = l; renderSources(); };
+
+function getGame(id, src, name) {
+  if (!games.has(id)) games.set(id, { id, src, name, fens: [new Chess().fen()], ucis: [], sans: [], result: '*', over: false, unseen: 0 });
+  return games.get(id);
+}
+function onPgn(text, src) {
+  if (!text.includes('[')) return;
+  const h = {}; for (const m of text.matchAll(/^\[(\w+) "(.*)"\]\s*$/gm)) h[m[1]] = m[2];
+  const id = (h.GameURL || '').split('/').pop() || `${src.id}:${h.White}-${h.Black}`;
+  const c = new Chess(); try { c.loadPgn(text); } catch { return; }
+  const r = new Chess(h.FEN || undefined), fens = [r.fen()], ucis = [], sans = [], clk = {};
+  const notes = new Map(c.getComments().map(x => [x.fen, x.comment])); // "[%clk 1:30:42]" = mover's time left
+  for (const m of c.history({ verbose: true })) {
+    r.move(m.san); fens.push(r.fen()); ucis.push(m.from + m.to + (m.promotion || '')); sans.push(m.san);
+    const t = /%clk (\d+):(\d+):(\d+(?:\.\d+)?)/.exec(notes.get(r.fen()) || '');
+    if (t) clk[m.color] = t[1] * 3600 + t[2] * 60 + +t[3];
+  }
+  const g = getGame(id, src, `${h.White} – ${h.Black}`);
+  g.clk = clk;
+  g.result = h.Result || '*'; g.over = g.result !== '*';
+  update(g, ucis, sans, fens);
+}
+function onGameHead(g, o) {
+  const pl = c => o.players?.[c]?.user?.name || o.players?.[c]?.aiLevel && `Stockfish ${o.players[c].aiLevel}` || c;
+  g.name = `${pl('white')} – ${pl('black')}`;
+  const st = o.status?.name || o.status;
+  if (st && !['created', 'started'].includes(st)) {
+    g.over = true; g.result = o.winner === 'white' ? '1-0' : o.winner === 'black' ? '0-1' : '½-½';
+    if (g.id === cur) { draw(); renderPanel(); }
+  }
+  renderList();
+}
+function onTick(g, o) {
+  if (!o.fen) return;
+  if (o.wc != null) g.clk = { w: o.wc, b: o.bc };
+  if (!o.lm) { if (!g.ucis.length) g.fens = [o.fen]; g.ri = 0; return; }
+  if (g.ri++ < g.ucis.length) return; // already have this move from an earlier connection
+  const m = playUci(g.fens.at(-1), o.lm);
+  update(g, [...g.ucis, m ? toUci(m) : o.lm], [...g.sans, m ? m.san : o.lm], [...g.fens, o.fen]);
+}
+// Lichess may write castling as king-takes-rook (e1h1); chess.js wants e1g1.
+const CASTLE = { e1h1: 'e1g1', e1a1: 'e1c1', e8h8: 'e8g8', e8a8: 'e8c8' };
+function playUci(fen, u) {
+  const c = new Chess(fen);
+  for (const x of [u, CASTLE[u.slice(0, 4)]]) if (x) try { return c.move({ from: x.slice(0, 2), to: x.slice(2, 4), promotion: x[4] }); } catch {}
+  return null;
+}
+const toUci = m => m.from + m.to + (m.promotion || '');
+
+function update(g, ucis, sans, fens) {
+  const added = ucis.length - g.ucis.length;
+  if (added <= 0 && ucis.join() === g.ucis.join()) { g.loaded = true; return renderList(); }
+  g.ucis = ucis; g.sans = sans; g.fens = fens;
+  const fresh = added > 0 && g.loaded && Date.now() > g.src.quiet;
+  g.loaded = true;
+  if (fresh) g.at = Date.now(); // we saw this move land, so we can run the clock from here
+  if (fresh && g.id !== cur) g.unseen += added;
+  reveal(g);
+  if (fresh) notify(g);
+  if (g.id === wantGame) { wantGame = null; select(g.id); }
+  else if (!cur && !wantGame) select(g.id);
+  else if (g.id === cur) { if (!pinned) feedback = feedback?.gid === g.id ? feedback : null; draw(); renderPanel(); }
+  renderList();
+}
+
+// ---------- guesses ----------
+function reveal(g) {
+  const gs = guesses[g.id]; if (!gs) return;
+  for (const [p, x] of Object.entries(gs)) {
+    if (x.actual || +p >= g.ucis.length) continue;
+    Object.assign(x, { actual: g.ucis[p], actualSan: g.sans[p], match: x.uci === g.ucis[p] });
+    if (g.id === cur) { feedback = { gid: g.id, ply: +p }; fetchEval(g, +p); }
+  }
+  save();
+}
+async function fetchEval(g, p) {
+  const x = guesses[g.id][p];
+  try {
+    const r = await fetch(`${API}/api/cloud-eval?fen=${encodeURIComponent(g.fens[p])}`);
+    if (!r.ok) return; // no cloud eval for this position: skip quietly
+    const pv = (await r.json()).pvs?.[0]; if (!pv) return;
+    x.eval = pv.mate != null ? `#${pv.mate}` : (pv.cp > 0 ? '+' : '') + (pv.cp / 100).toFixed(2);
+    const b = pv.moves.split(' ')[0];
+    x.bestSan = playUci(g.fens[p], b)?.san || b;
+    save(); renderPanel();
+  } catch {}
+}
+const moveNo = p => p % 2 ? `${(p + 1) / 2}…` : `${p / 2 + 1}.`;
+
+function notify(g) {
+  if (!bells[g.id] || !('Notification' in window) || Notification.permission !== 'granted') return;
+  if (!document.hidden && g.id === cur) return;
+  const p = g.sans.length - 1;
+  const n = new Notification(g.name, { body: `${moveNo(p)} ${g.sans[p]}${g.over ? '' : ' — what would you play now?'}`, tag: g.id, renotify: true });
+  n.onclick = () => { window.focus(); select(g.id); n.close(); };
+}
+
+// ---------- board ----------
+const cg = Chessground($('#board'), {
+  movable: { free: false, showDests: true, events: { after: (o, d) => onUserMove(o, d) } },
+  draggable: { showGhost: true }, highlight: { lastMove: true, check: true },
+});
+const tryMove = (c, o, d) => { try { return c.move({ from: o, to: d, promotion: 'q' }); } catch { return null; } };
+function dests(c) {
+  const m = new Map();
+  for (const mv of c.moves({ verbose: true })) m.set(mv.from, [...(m.get(mv.from) || []), mv.to]);
+  return m;
+}
+function draw() {
+  const g = games.get(cur); if (!g) return;
+  let c, last, shapes = [], canMove;
+  if (pinned) { c = explore; const h = explore.history({ verbose: true }).at(-1); last = h ? [h.from, h.to] : uciSq(g.ucis[pinPly - 1]); canMove = true; }
+  else {
+    c = new Chess(g.fens.at(-1)); last = uciSq(g.ucis.at(-1));
+    const mine = guesses[g.id]?.[g.ucis.length];
+    if (mine) shapes = [{ orig: mine.uci.slice(0, 2), dest: mine.uci.slice(2, 4), brush: 'blue' }];
+    canMove = !g.over && !mine;
+  }
+  const color = c.turn() === 'w' ? 'white' : 'black';
+  cg.set({ fen: c.fen(), orientation: orient, turnColor: color, lastMove: last, check: c.inCheck() ? color : false,
+    movable: { color: canMove ? color : undefined, dests: canMove ? dests(c) : new Map() } });
+  cg.setAutoShapes(shapes);
+  drawClocks();
+}
+// Clocks always show the live game. The side to move counts down from when we saw the last move arrive;
+// right after loading we don't know when that was, so the clock holds still until the next move.
+function drawClocks() {
+  const g = games.get(cur); if (!g) return;
+  const [wn, bn] = g.name.split(' – '), turn = g.fens.at(-1).split(' ')[1];
+  const paint = (el, col, name) => {
+    const run = !g.over && turn === col && g.ucis.length > 0;
+    let t = g.clk?.[col];
+    if (t != null && run && g.at) t = Math.max(0, t - (Date.now() - g.at) / 1000);
+    el.className = `clk${run ? ' run' : ''}${t != null && t < 60 ? ' low' : ''}`;
+    el.innerHTML = `<span>${esc(name || '')}</span><b>${fmtClock(t)}</b>`;
+  };
+  const [top, bot] = orient === 'white' ? [['b', bn], ['w', wn]] : [['w', wn], ['b', bn]];
+  paint($('#clkTop'), ...top); paint($('#clkBot'), ...bot);
+}
+function fmtClock(t) {
+  if (t == null) return '–:––';
+  t = Math.floor(t); const h = Math.floor(t / 3600), m = Math.floor(t / 60) % 60, s = String(t % 60).padStart(2, '0');
+  return h ? `${h}:${String(m).padStart(2, '0')}:${s}` : `${m}:${s}`;
+}
+setInterval(drawClocks, 500);
+const uciSq = u => u ? [u.slice(0, 2), u.slice(2, 4)] : undefined;
+function onUserMove(o, d) {
+  const g = games.get(cur);
+  if (pinned) { tryMove(explore, o, d); return draw(); }
+  const c = new Chess(g.fens.at(-1)), m = tryMove(c, o, d);
+  if (m) { (guesses[g.id] ??= {})[g.ucis.length] = { uci: m.from + m.to + (m.promotion || ''), san: m.san }; save(); }
+  draw(); renderPanel();
+}
+function select(id) {
+  cur = id; pinned = false; explore = null; feedback = null;
+  const g = games.get(id); g.unseen = 0;
+  draw(); renderPanel(); renderList();
+  $('#clkTop').scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+}
+function setPinned(on) {
+  const g = games.get(cur); pinned = on;
+  if (on) { pinPly = g.ucis.length; explore = new Chess(g.fens.at(-1)); } else explore = null;
+  draw(); renderPanel();
+}
+// Step through the real game. Stepping back pins automatically; ⏭ / End returns to live.
+function step(d) {
+  const g = games.get(cur); if (!g) return;
+  if (d === Infinity) return setPinned(false);
+  if (!pinned) { if (d > 0) return; setPinned(true); }
+  if (d === -1 && explore.history().length) explore.undo(); // undo your own line first
+  else { pinPly = Math.max(0, Math.min(g.ucis.length, d === -Infinity ? 0 : pinPly + d)); explore = new Chess(g.fens[pinPly]); }
+  draw(); renderPanel();
+}
+document.addEventListener('keydown', e => {
+  if (e.target.closest?.('input')) return;
+  const d = { ArrowLeft: -1, ArrowRight: 1, Home: -Infinity, End: Infinity }[e.key];
+  if (d) { e.preventDefault(); step(d); }
+});
+
+// ---------- UI ----------
+function renderSources() {
+  $('#sources').innerHTML = sources.map((s, i) => `<span>${s.kind} ${s.id} · ${s.label || ''}<b data-i="${i}" title="Stop watching">✕</b></span>`).join('');
+  $('#sources').querySelectorAll('b').forEach(b => b.onclick = () => {
+    const s = sources.splice(+b.dataset.i, 1)[0]; ctrls.get(s.id)?.abort();
+    for (const [id, g] of games) if (g.src.id === s.id) games.delete(id);
+    if (!games.has(cur)) cur = null; save(); renderSources(); renderList(); renderPanel();
+  });
+}
+function renderList() {
+  const el = $('#games'), list = [...games.values()];
+  if (!list.length) return;
+  el.innerHTML = list.map(g => `<div class="g ${g.id === cur ? 'cur' : ''}" data-id="${g.id}">
+    <div class="n">${esc(g.name)}<small>${g.over ? g.result : `${g.ucis.length} plies · live`}</small></div>
+    ${g.unseen ? `<span class="badge">${g.unseen}</span>` : ''}
+    <button class="bell ${bells[g.id] ? 'on' : ''}" title="Notify on every move">🔔</button></div>`).join('');
+  el.querySelectorAll('.g').forEach(r => r.onclick = e => {
+    const id = r.dataset.id;
+    if (e.target.closest('.bell')) { bells[id] = !bells[id]; save(); if (bells[id]) $('#notif').click(); return renderList(); }
+    select(id);
+  });
+  const n = list.reduce((a, g) => a + g.unseen, 0);
+  document.title = (n ? `(${n}) ` : '') + 'Your Move';
+}
+const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+function renderPanel() {
+  const g = games.get(cur), el = $('#panel');
+  if (!g) return el.innerHTML = '<div class="card dim">Pick a game on the left.</div>';
+  const ply = g.ucis.length, side = ply % 2 ? 'Black' : 'White', mine = guesses[g.id]?.[ply];
+  const gs = Object.entries(guesses[g.id] || {}).filter(([, x]) => x.actual).sort((a, b) => a[0] - b[0]);
+  const hits = gs.filter(([, x]) => x.match).length, rate = gs.length ? Math.round(100 * hits / gs.length) : 0;
+  let status;
+  if (pinned) {
+    const ahead = ply - pinPly, line = explore.history();
+    status = `<b>Pinned</b> at ${pinPly ? `${moveNo(pinPly - 1)} ${g.sans[pinPly - 1]}` : 'the start'} <span class="dim">(${pinPly}/${ply})</span>
+      ${line.length ? `<br>Your line: <b>${line.join(' ')}</b>` : '<br><span class="dim">Drag pieces to try lines · ◀ ▶ or arrow keys step through the game</span>'}
+      ${ahead > 0 ? `<br><span class="bad">Live is ${ahead} move${ahead > 1 ? 's' : ''} ahead</span>` : ''}
+      <div class="row" style="margin-top:6px"><button id="reset">Reset line</button><button id="catch" class="on">Catch up</button></div>`;
+  } else if (g.over) status = `<b>Game over: ${g.result}</b>`;
+  else status = mine ? `Your guess <b>${mine.san}</b> is locked. Waiting for ${side}…` : `<b>${side} to move.</b> Drag the move you think they'll play.`;
+  const fb = feedback && guesses[g.id]?.[feedback.ply], f = fb && `<div class="card">
+      <div class="${fb.match ? 'ok' : 'bad'}"><b>${fb.match ? '✓ Match' : '✗ Miss'}</b> — ${moveNo(feedback.ply)} played <b>${fb.actualSan}</b>${fb.match ? '' : `, you said <b>${fb.san}</b>`}</div>
+      ${fb.eval ? `<div class="dim">Cloud eval before the move: ${fb.eval} · best <b>${fb.bestSan}</b></div>` : ''}</div>`;
+  const table = (g.over && gs.length) ? `<div class="card"><b>Your guesses vs the game — ${hits}/${gs.length} (${rate}%)</b>
+      <table><tr><th>Move</th><th>You</th><th>Played</th><th></th></tr>${gs.map(([p, x]) =>
+      `<tr><td>${moveNo(+p)}</td><td>${x.san}</td><td>${x.actualSan}</td><td class="${x.match ? 'ok' : 'bad'}">${x.match ? '✓' : '✗'}</td></tr>`).join('')}</table></div>` : '';
+  el.innerHTML = `<div class="card"><b>${esc(g.name)}</b><div class="dim">${ply ? `Last: ${moveNo(ply - 1)} ${g.sans.at(-1)}` : 'No moves yet'}
+      ${gs.length && !g.over ? ` · guesses ${hits}/${gs.length} (${rate}%)` : ''}</div></div>
+    <div class="card">${status}</div>${f || ''}${table}
+    <div class="row"><button data-step="-Infinity" title="Start (Home)">⏮</button><button data-step="-1" title="Back (←)">◀</button>
+      <button data-step="1" title="Forward (→)">▶</button><button data-step="Infinity" title="Live (End)">⏭</button></div>
+    <div class="row"><button id="pin" class="${pinned ? 'on' : ''}">${pinned ? 'Unpin' : 'Pin this position'}</button>
+      <button id="flip">Flip board</button></div>`;
+  el.querySelectorAll('[data-step]').forEach(b => b.onclick = () => step(+b.dataset.step));
+  $('#pin').onclick = () => setPinned(!pinned);
+  $('#flip').onclick = () => { orient = orient === 'white' ? 'black' : 'white'; draw(); };
+  if (pinned) { $('#catch').onclick = () => setPinned(false); $('#reset').onclick = () => { explore = new Chess(g.fens[pinPly]); draw(); }; }
+}
+
+document.addEventListener('visibilitychange', () => { if (!document.hidden && cur) { games.get(cur).unseen = 0; renderList(); } });
+renderNotif(); renderSources(); renderPanel();
+sources.forEach(watch);
+// Deep links: watcher.py (and shared links) open the app as /#<lichess url> to jump straight to a game.
+function openFromHash() {
+  if (location.hash.length < 2) return;
+  $('#url').value = decodeURIComponent(location.hash.slice(1));
+  history.replaceState(null, '', location.pathname); $('#add').click();
+}
+openFromHash(); addEventListener('hashchange', openFromHash);
+</script>
+</body>
+</html>
