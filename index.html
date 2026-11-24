@@ -15,6 +15,8 @@
   header input { flex:1; min-width:220px; padding:8px; background:var(--panel); color:var(--fg); border:1px solid var(--line); border-radius:6px; }
   button { background:var(--panel); color:var(--fg); border:1px solid var(--line); border-radius:6px; padding:7px 11px; cursor:pointer; }
   button:hover { border-color:var(--acc); } button.on { background:var(--acc); color:#111; border-color:var(--acc); }
+  .msg { margin:8px 16px 0; padding:8px 12px; border:1px solid var(--bad); border-radius:6px; background:var(--panel); }
+  .msg code { background:var(--bg); padding:1px 5px; border-radius:4px; } .msg a { color:var(--acc); }
   #sources { display:flex; gap:6px; flex-wrap:wrap; padding:6px 16px; color:var(--dim); font-size:12px; }
   #sources span { border:1px solid var(--line); border-radius:12px; padding:2px 8px; } #sources b { cursor:pointer; margin-left:6px; }
   main { display:grid; grid-template-columns:250px auto 1fr; gap:16px; padding:12px 16px; align-items:start; }
@@ -42,7 +44,21 @@
   <button id="add">Watch</button>
   <button id="notif">Enable notifications</button>
 </header>
+<div id="msg" class="msg" hidden></div>
 <div id="sources"></div>
+<script>
+  // Runs even if the app module below can't start, so the page never fails silently.
+  (function () {
+    var fix = location.protocol === 'file:' || location.protocol === 'data:'
+      ? 'This page was opened as a file, so it can\'t talk to Lichess. In Terminal run <code>cd ~/your-move</code> then <code>python3 watcher.py</code>, and open <a href="http://localhost:8765">http://localhost:8765</a>.'
+      : 'The chess libraries didn\'t load (cdn.jsdelivr.net). Check your internet connection and reload.';
+    function show() { if (window.appReady) return; var m = document.getElementById('msg'); m.innerHTML = fix; m.hidden = false; }
+    document.addEventListener('click', function (e) { if (e.target.id === 'add') setTimeout(show, 50); });
+    document.addEventListener('keydown', function (e) { if (e.key === 'Enter' && e.target.id === 'url') setTimeout(show, 50); });
+    document.addEventListener('paste', function (e) { if (e.target.id === 'url') setTimeout(show, 50); });
+    setTimeout(show, 8000);
+  })();
+</script>
 <main>
   <aside id="games"><div class="g dim">No games yet — paste a URL above.</div></aside>
   <div><div class="clk" id="clkTop"></div><div id="board"></div><div class="clk" id="clkBot"></div></div>
@@ -80,13 +96,17 @@ function parseInput(s) {
 }
 $('#add').onclick = () => {
   const src = parseInput($('#url').value);
-  if (!src) return alert('Could not read a broadcast round or game id from that URL.');
+  if (!src) return say('That doesn\'t look like a Lichess broadcast or game link. Example: https://lichess.org/broadcast/…/…/xLgOJ6cb');
+  say('');
   wantGame = src.gameId || (src.kind === 'game' ? src.id : null);
   if (!sources.some(x => x.id === src.id)) { sources.push({ kind: src.kind, id: src.id }); save(); watch(sources.at(-1)); }
   else if (wantGame && games.has(wantGame)) select(wantGame);
   $('#url').value = ''; renderSources();
 };
 $('#url').onkeydown = e => e.key === 'Enter' && $('#add').click();
+// Pasting a link loads it straight away, no need to press Enter or Watch.
+$('#url').addEventListener('paste', () => setTimeout(() => parseInput($('#url').value) && $('#add').click()));
+const say = t => { $('#msg').textContent = t; $('#msg').hidden = !t; };
 $('#notif').onclick = async () => { await Notification.requestPermission(); renderNotif(); };
 const renderNotif = () => {
   const p = 'Notification' in window ? Notification.permission : 'denied';
@@ -418,6 +438,7 @@ async function syncWatcher() {
   renderNotif();
 }
 fetch('/follow').then(r => { watcherOn = r.ok && r.headers.get('Content-Type') === 'application/json'; syncWatcher(); }).catch(() => {});
+window.appReady = true;
 renderNotif(); renderSources(); renderPanel();
 sources.forEach(watch);
 // Deep links: watcher.py (and shared links) open the app as /#<lichess url> to jump straight to a game.
