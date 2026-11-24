@@ -103,7 +103,8 @@ $('#add').onclick = () => {
   else if (wantGame && games.has(wantGame)) select(wantGame);
   $('#url').value = ''; renderSources();
 };
-$('#url').onkeydown = e => e.key === 'Enter' && $('#add').click();
+// (Not `onkeydown = e => cond && …`: a handler returning false cancels the key, which blocked Backspace and ⌘V.)
+$('#url').addEventListener('keydown', e => { if (e.key === 'Enter') $('#add').click(); });
 // Pasting a link loads it straight away, no need to press Enter or Watch.
 $('#url').addEventListener('paste', () => setTimeout(() => parseInput($('#url').value) && $('#add').click()));
 const say = t => { $('#msg').textContent = t; $('#msg').hidden = !t; };
@@ -253,21 +254,55 @@ function reveal(g) {
   for (const [p, x] of Object.entries(gs)) {
     if (x.actual || +p >= g.ucis.length) continue;
     Object.assign(x, { actual: g.ucis[p], actualSan: g.sans[p], match: x.uci === g.ucis[p] });
-    if (g.id === cur) { feedback = { gid: g.id, ply: +p }; fetchEval(g, +p); }
+    if (g.id === cur) feedback = { gid: g.id, ply: +p };
+    gradeGuess(x).then(() => g.id === cur && renderPanel());
   }
   save();
 }
-async function fetchEval(g, p) {
-  const x = guesses[g.id][p];
-  try {
-    const r = await fetch(`${API}/api/cloud-eval?fen=${encodeURIComponent(g.fens[p])}`);
-    if (!r.ok) return; // no cloud eval for this position: skip quietly
-    const pv = (await r.json()).pvs?.[0]; if (!pv) return;
-    x.eval = pv.mate != null ? `#${pv.mate}` : (pv.cp > 0 ? '+' : '') + (pv.cp / 100).toFixed(2);
-    const b = pv.moves.split(' ')[0];
-    x.bestSan = playUci(g.fens[p], b)?.san || b;
-    save(); renderPanel();
+
+// ---------- grading: there's no "right answer" in a live game, so we compare with the engine's best move ----------
+// Lichess cloud eval when it knows the position (deep, instant); otherwise Stockfish running in this page.
+const SF_URL = 'https://cdn.jsdelivr.net/npm/stockfish.js@10.0.2/stockfish.js';
+let sf, sfQueue = Promise.resolve();
+function sfSearch(fen, move) { // -> {cp|mate (side to move's view), move}; one search at a time
+  const run = () => new Promise(res => {
+    sf ??= new Worker(URL.createObjectURL(new Blob([`importScripts('${SF_URL}')`], { type: 'text/javascript' })));
+    let last = {};
+    sf.onmessage = e => {
+      const l = String(e.data), m = /score (cp|mate) (-?\d+) (?!upperbound|lowerbound)/.exec(l);
+      if (m) last = { [m[1]]: +m[2] };
+      if (l.startsWith('bestmove')) res({ ...last, move: l.split(' ')[1] });
+    };
+    sf.postMessage(`position fen ${fen}`);
+    sf.postMessage(`go movetime 1500${move ? ` searchmoves ${move}` : ''}`);
+  });
+  return (sfQueue = sfQueue.then(run, run));
+}
+const cpOf = s => s.mate != null ? Math.sign(s.mate) * (100000 - Math.abs(s.mate) * 100) : s.cp;
+const GRADES = [[0, 'Best move'], [30, 'Excellent'], [80, 'Good'], [150, 'Inaccuracy'], [300, 'Mistake'], [Infinity, 'Blunder']];
+const gradeOf = loss => GRADES.find(([max]) => loss <= max)[1];
+const grading = new Set();
+async function gradeGuess(x) {
+  if (x.grade || !x.fen || !x.actual || grading.has(x)) return;
+  grading.add(x);
+  const white = x.fen.split(' ')[1] === 'w', sign = white ? 1 : -1;
+  let lines = [];
+  try { // cloud scores are from White's side; flip them to the side to move
+    const r = await fetch(`${API}/api/cloud-eval?fen=${encodeURIComponent(x.fen)}&multiPv=5`);
+    if (r.ok) lines = (await r.json()).pvs.map(p => p.mate == null
+      ? { cp: p.cp * sign, move: p.moves.split(' ')[0] } : { mate: p.mate * sign, move: p.moves.split(' ')[0] });
   } catch {}
+  if (!lines.length) lines.push(await sfSearch(x.fen));
+  const best = lines[0];
+  const scoreOf = async u => lines.find(l => l.move === u) || (lines.push({ ...(await sfSearch(x.fen, u)), move: u }), lines.at(-1));
+  const loss = s => s.move === best.move ? 0 : Math.max(1, cpOf(best) - cpOf(s));
+  const you = await scoreOf(x.uci), played = await scoreOf(x.actual);
+  Object.assign(x, {
+    best: best.move, bestSan: playUci(x.fen, best.move)?.san || best.move,
+    eval: best.mate != null ? `#${best.mate * sign}` : ((best.cp * sign) > 0 ? '+' : '') + (best.cp * sign / 100).toFixed(2),
+    loss: loss(you), grade: gradeOf(loss(you)), playedLoss: loss(played), playedGrade: gradeOf(loss(played)),
+  });
+  grading.delete(x); save();
 }
 const moveNo = p => p % 2 ? `${(p + 1) / 2}…` : `${p / 2 + 1}.`;
 
@@ -275,7 +310,7 @@ function notify(g) {
   if (watcherOn || !bells[g.id] || !('Notification' in window) || Notification.permission !== 'granted') return;
   if (!document.hidden && g.id === cur) return;
   const p = g.sans.length - 1;
-  const n = new Notification(g.name, { body: `${moveNo(p)} ${g.sans[p]}${g.over ? '' : ' — what would you play now?'}`, tag: g.id, renotify: true });
+  const n = new Notification(g.name, { body: `${moveNo(p)} ${g.sans[p]}${g.over ? '' : ' — find the best move'}`, tag: g.id, renotify: true });
   n.onclick = () => { window.focus(); select(g.id); n.close(); };
 }
 
@@ -332,7 +367,7 @@ function onUserMove(o, d) {
   const g = games.get(cur);
   if (pinned) { tryMove(explore, o, d); return draw(); }
   const c = new Chess(g.fens.at(-1)), m = tryMove(c, o, d);
-  if (m) { (guesses[g.id] ??= {})[g.ucis.length] = { uci: m.from + m.to + (m.promotion || ''), san: m.san }; save(); }
+  if (m) { (guesses[g.id] ??= {})[g.ucis.length] = { uci: toUci(m), san: m.san, fen: g.fens.at(-1) }; save(); }
   draw(); renderPanel();
 }
 function select(id) {
@@ -397,7 +432,9 @@ function renderPanel() {
   if (!g) return el.innerHTML = '<div class="card dim">Pick a game on the left.</div>';
   const ply = g.ucis.length, side = ply % 2 ? 'Black' : 'White', mine = guesses[g.id]?.[ply];
   const gs = Object.entries(guesses[g.id] || {}).filter(([, x]) => x.actual).sort((a, b) => a[0] - b[0]);
-  const hits = gs.filter(([, x]) => x.match).length, rate = gs.length ? Math.round(100 * hits / gs.length) : 0;
+  const graded = gs.filter(([, x]) => x.grade), found = graded.filter(([, x]) => x.loss === 0).length;
+  const same = gs.filter(([, x]) => x.match).length;
+  const score = graded.length ? `best move found ${found}/${graded.length} (${Math.round(100 * found / graded.length)}%)` : '';
   let status;
   if (pinned) {
     const ahead = ply - pinPly, line = explore.history();
@@ -407,16 +444,21 @@ function renderPanel() {
       <div class="row" style="margin-top:6px"><button id="reset">Reset line</button><button id="catch" class="on">Catch up</button></div>`;
   } else if (g.over) status = `<b>Game over: ${g.result}</b>`;
   else if (!ply && g.src.startsAt > Date.now()) status = `<b>Not started yet.</b> Starts ${fmtStart(g.src.startsAt)}.
-    ${mine ? `Your first-move guess <b>${mine.san}</b> is locked.` : 'You can already guess the first move.'}`;
-  else status = mine ?`Your guess <b>${mine.san}</b> is locked. Waiting for ${side}…` : `<b>${side} to move.</b> Drag the move you think they'll play.`;
-  const fb = feedback && guesses[g.id]?.[feedback.ply], f = fb && `<div class="card">
-      <div class="${fb.match ? 'ok' : 'bad'}"><b>${fb.match ? '✓ Match' : '✗ Miss'}</b> — ${moveNo(feedback.ply)} played <b>${fb.actualSan}</b>${fb.match ? '' : `, you said <b>${fb.san}</b>`}</div>
-      ${fb.eval ? `<div class="dim">Cloud eval before the move: ${fb.eval} · best <b>${fb.bestSan}</b></div>` : ''}</div>`;
-  const table = (g.over && gs.length) ? `<div class="card"><b>Your guesses vs the game — ${hits}/${gs.length} (${rate}%)</b>
-      <table><tr><th>Move</th><th>You</th><th>Played</th><th></th></tr>${gs.map(([p, x]) =>
-      `<tr><td>${moveNo(+p)}</td><td>${x.san}</td><td>${x.actualSan}</td><td class="${x.match ? 'ok' : 'bad'}">${x.match ? '✓' : '✗'}</td></tr>`).join('')}</table></div>` : '';
+    ${mine ? `Your first move <b>${mine.san}</b> is locked in.` : 'You can already find the best first move.'}`;
+  else status = mine ? `Your move <b>${mine.san}</b> is locked in. Waiting for ${side}…` : `<b>${side} to move.</b> Find the best move and drag it.`;
+  const tone = l => l <= 30 ? 'ok' : l <= 80 ? '' : 'bad';
+  const fb = feedback && guesses[g.id]?.[feedback.ply], f = fb && `<div class="card">${fb.grade
+    ? `<div class="${tone(fb.loss)}"><b>${fb.loss === 0 ? '✓ You found the best move' : fb.grade}</b>${fb.loss
+        ? ` — you chose <b>${fb.san}</b>, best was <b>${fb.bestSan}</b> (−${(fb.loss / 100).toFixed(1)})` : `: <b>${fb.san}</b>`}</div>
+      <div class="dim">${moveNo(feedback.ply)} ${fb.actualSan} was played: ${fb.playedGrade}${fb.match ? ' (same as you)' : ''} · eval ${fb.eval}</div>`
+    : `<div class="dim">Checking <b>${fb.san}</b> against the engine… (${moveNo(feedback.ply)} ${fb.actualSan} was played)</div>`}</div>`;
+  const table = (g.over && gs.length) ? `<div class="card"><b>Your moves vs the engine: ${score || 'not graded'}</b>
+      <div class="dim">Same move as the player ${same}/${gs.length}</div>
+      <table><tr><th>Move</th><th>You</th><th></th><th>Best</th><th>Played</th></tr>${gs.map(([p, x]) =>
+      `<tr><td>${moveNo(+p)}</td><td>${x.san}</td><td class="${x.grade ? tone(x.loss) : 'dim'}">${x.grade || '—'}</td>
+        <td>${x.bestSan || '—'}</td><td>${x.actualSan}</td></tr>`).join('')}</table></div>` : '';
   el.innerHTML = `<div class="card"><b>${esc(g.name)}</b><div class="dim">${ply ? `Last: ${moveNo(ply - 1)} ${g.sans.at(-1)}` : 'No moves yet'}
-      ${gs.length && !g.over ? ` · guesses ${hits}/${gs.length} (${rate}%)` : ''}</div></div>
+      ${score && !g.over ? ` · ${score}` : ''}</div></div>
     <div class="card">${status}</div>${f || ''}${table}
     <div class="row"><button data-step="-Infinity" title="Start (Home)">⏮</button><button data-step="-1" title="Back (←)">◀</button>
       <button data-step="1" title="Forward (→)">▶</button><button data-step="Infinity" title="Live (End)">⏭</button></div>
@@ -439,6 +481,7 @@ async function syncWatcher() {
 }
 fetch('/follow').then(r => { watcherOn = r.ok && r.headers.get('Content-Type') === 'application/json'; syncWatcher(); }).catch(() => {});
 window.appReady = true;
+for (const gs of Object.values(guesses)) for (const x of Object.values(gs)) gradeGuess(x); // anything left ungraded last time
 renderNotif(); renderSources(); renderPanel();
 sources.forEach(watch);
 // Deep links: watcher.py (and shared links) open the app as /#<lichess url> to jump straight to a game.
