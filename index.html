@@ -99,10 +99,21 @@ $('#add').onclick = () => {
   if (!src) return say('That doesn\'t look like a Lichess broadcast or game link. Example: https://lichess.org/broadcast/…/…/xLgOJ6cb');
   say('');
   wantGame = src.gameId || (src.kind === 'game' ? src.id : null);
-  if (!sources.some(x => x.id === src.id)) { sources.push({ kind: src.kind, id: src.id }); save(); watch(sources.at(-1)); }
+  // A link to one game follows just that game; a link to the round follows every game in it.
+  // Either way it's one Lichess connection per round, with `only` listing the games to show.
+  const ex = sources.find(x => x.id === src.id);
+  if (!ex) { sources.push({ kind: src.kind, id: src.id, only: src.gameId ? [src.gameId] : null }); save(); watch(sources.at(-1)); }
+  else if (ex.only && !src.gameId) { ex.only = null; restart(ex); }
+  else if (ex.only && !ex.only.includes(src.gameId)) { ex.only.push(src.gameId); restart(ex); }
   else if (wantGame && games.has(wantGame)) select(wantGame);
   $('#url').value = ''; renderSources();
 };
+function restart(s) { // re-read a round after changing which of its games we follow
+  ctrls.get(s.id)?.abort();
+  for (const [id, g] of games) if (g.src.id === s.id) games.delete(id);
+  if (!games.has(cur)) cur = null;
+  save(); watch(s); renderList(); renderPanel();
+}
 // (Not `onkeydown = e => cond && …`: a handler returning false cancels the key, which blocked Backspace and ⌘V.)
 $('#url').addEventListener('keydown', e => { if (e.key === 'Enter') $('#add').click(); });
 // Pasting a link loads it straight away, no need to press Enter or Watch.
@@ -184,6 +195,7 @@ function onPgn(text, src) {
   if (!text.includes('[')) return;
   const h = {}; for (const m of text.matchAll(/^\[(\w+) "(.*)"\]\s*$/gm)) h[m[1]] = m[2];
   const id = (h.GameURL || '').split('/').pop() || `${src.id}:${h.White}-${h.Black}`;
+  if (src.only && !src.only.includes(id)) return; // a game in this round you're not following
   const c = new Chess(); try { c.loadPgn(text); } catch { return; }
   const r = new Chess(h.FEN || undefined), fens = [r.fen()], ucis = [], sans = [], clk = {};
   const notes = new Map(c.getComments().map(x => [x.fen, x.comment])); // "[%clk 1:30:42]" = mover's time left
@@ -352,23 +364,36 @@ document.addEventListener('keydown', e => {
 
 // ---------- UI ----------
 function renderSources() {
-  $('#sources').innerHTML = sources.map((s, i) => `<span>${esc(s.name || `${s.kind} ${s.id}`)} · ${s.label || ''}<b data-i="${i}" title="Stop watching">✕</b></span>`).join('');
+  $('#sources').innerHTML = sources.map((s, i) => `<span>${esc(s.name || `${s.kind} ${s.id}`)}${s.only
+    ? ` · ${s.only.length} game${s.only.length > 1 ? 's' : ''}` : s.kind === 'round' ? ' · all games' : ''} · ${s.label || ''}<b data-i="${i}" title="Stop watching">✕</b></span>`).join('');
   $('#sources').querySelectorAll('b').forEach(b => b.onclick = () => {
     const s = sources.splice(+b.dataset.i, 1)[0]; ctrls.get(s.id)?.abort();
     for (const [id, g] of games) if (g.src.id === s.id) games.delete(id);
     if (!games.has(cur)) cur = null; save(); renderSources(); renderList(); renderPanel();
   });
 }
+// Stop following one game. For a whole round, the rest of its games stay.
+function drop(g) {
+  const s = g.src;
+  delete bells[g.id]; syncWatcher();
+  if (s.kind === 'round') s.only = (s.only || [...games.values()].filter(x => x.src === s).map(x => x.id)).filter(id => id !== g.id);
+  games.delete(g.id);
+  if (s.kind === 'game' || !s.only.length) { sources.splice(sources.indexOf(s), 1); ctrls.get(s.id)?.abort(); }
+  if (cur === g.id) { cur = null; const next = games.values().next().value; if (next) select(next.id); }
+  save(); renderSources(); renderList(); renderPanel();
+}
 function renderList() {
   const el = $('#games'), list = [...games.values()];
-  if (!list.length) return;
+  if (!list.length) { el.innerHTML = '<div class="g dim">No games yet — paste a URL above.</div>'; document.title = 'Your Move'; return; }
   el.innerHTML = list.map(g => `<div class="g ${g.id === cur ? 'cur' : ''}" data-id="${g.id}">
     <div class="n">${esc(g.name)}<small>${g.over ? g.result : g.ucis.length ? `${g.ucis.length} plies · live`
       : g.src.startsAt > Date.now() ? `starts ${fmtStart(g.src.startsAt)}` : 'not started'}</small></div>
     ${g.unseen ? `<span class="badge">${g.unseen}</span>` : ''}
-    <button class="bell ${bells[g.id] ? 'on' : ''}" title="Pop up on every move">🔔</button></div>`).join('');
+    <button class="bell ${bells[g.id] ? 'on' : ''}" title="Pop up on every move">🔔</button>
+    <button class="bell drop" title="Stop following this game">✕</button></div>`).join('');
   el.querySelectorAll('.g').forEach(r => r.onclick = e => {
     const id = r.dataset.id;
+    if (e.target.closest('.drop')) return drop(games.get(id));
     if (e.target.closest('.bell')) {
       const g = games.get(id);
       if (bells[id]) delete bells[id];

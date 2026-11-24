@@ -23,6 +23,8 @@ straight to the position.
 
 - Drag the move you'd play. Change it as often as you like until the real move
   lands, then see your move next to theirs.
+- A link to one game follows just that game; a round link follows all of it. ✕
+  drops a game.
 - Pin a position to keep thinking while the game moves on, step through moves
   with ◀ ▶, and try your own lines.
 - Live clocks and start times. At the end of a game you get your moves next to
