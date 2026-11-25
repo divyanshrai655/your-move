@@ -21,7 +21,7 @@
   #sources span { border:1px solid var(--line); border-radius:12px; padding:2px 8px; } #sources b { cursor:pointer; margin-left:6px; }
   main { display:grid; grid-template-columns:250px auto 1fr; gap:16px; padding:12px 16px; align-items:start; }
   /* narrow screens: board first, then the panel, then a short scrollable game list */
-  @media (max-width:900px) { main { grid-template-columns:1fr; } #games { order:3; max-height:40vh; } #panel { order:2; } }
+  @media (max-width:900px) { main { grid-template-columns:1fr; } #games { order:3; max-height:40vh; } #side { order:2; } }
   #games { max-height:80vh; overflow:auto; border:1px solid var(--line); border-radius:8px; }
   .g { display:flex; align-items:center; gap:6px; padding:7px 9px; border-bottom:1px solid var(--line); cursor:pointer; }
   .g.cur { background:var(--panel); box-shadow:inset 3px 0 var(--acc); } .g .n { flex:1; font-size:13px; }
@@ -36,14 +36,54 @@
   .ok { color:var(--ok); } .bad { color:var(--bad); } .dim { color:var(--dim); }
   table { border-collapse:collapse; width:100%; font-size:13px; } td,th { padding:3px 6px; border-bottom:1px solid var(--line); text-align:left; }
   .row { display:flex; gap:6px; flex-wrap:wrap; }
+  /* board colours come from settings: a checkerboard with a8 light */
+  #board cg-board { background:repeating-conic-gradient(var(--sq-d,#b58863) 0 25%, var(--sq-l,#f0d9b5) 0 50%) 0 0 / 25% 25%; }
+  #board { border-radius:4px; overflow:hidden; box-shadow:0 8px 28px rgba(0,0,0,.45); }
+  /* the whole game, always on the right */
+  .moves { position:relative; max-height:min(46vh,380px); overflow:auto; margin:-10px -12px 8px; border-radius:8px 8px 0 0; border-bottom:1px solid var(--line);
+    display:grid; grid-template-columns:42px 1fr 1fr; font-variant-numeric:tabular-nums; }
+  .moves .no { color:var(--dim); text-align:right; padding:4px 8px 4px 0; background:rgba(0,0,0,.18); }
+  .mv { padding:4px 8px; cursor:pointer; border-radius:3px; line-height:1.25; }
+  .mv:hover { background:rgba(255,255,255,.06); } .mv.cur { background:var(--acc); color:#111; font-weight:600; }
+  .mv i { display:block; font-style:normal; font-size:11px; color:var(--dim); } .mv.cur i { color:#333; }
+  .mv i.hit { color:var(--ok); } .mv.pending { color:#7fb0ff; cursor:default; font-style:italic; }
+  .moves .empty { grid-column:1/-1; padding:8px 12px; color:var(--dim); }
+  .nav { display:grid; grid-template-columns:repeat(4,1fr); gap:6px; } .nav button { font-size:15px; padding:5px; }
+  /* settings */
+  #settings { position:absolute; right:16px; top:56px; z-index:20; width:300px; box-shadow:0 12px 32px rgba(0,0,0,.5); }
+  #settings h4 { margin:10px 0 6px; font-size:12px; color:var(--dim); text-transform:uppercase; letter-spacing:.06em; } #settings h4:first-child { margin-top:0; }
+  .swatches { display:grid; grid-template-columns:repeat(4,1fr); gap:6px; }
+  .swatches button { padding:0; height:38px; border-width:2px; background:repeating-conic-gradient(var(--d) 0 25%, var(--l) 0 50%) 0 0 / 50% 50%; }
+  .swatches button.sel, .sets button.sel { border-color:var(--acc); box-shadow:0 0 0 1px var(--acc); }
+  .sets { display:grid; grid-template-columns:repeat(4,1fr); gap:6px; }
+  .sets button { padding:3px; height:46px; display:flex; align-items:center; justify-content:center; background:var(--bg); }
+  .sets img { width:36px; height:36px; }
+  /* moves and the friends' room side by side, stacked when there's no room */
+  #side { display:grid; grid-template-columns:minmax(220px,1fr) minmax(260px,340px); gap:16px; align-items:start; }
+  @media (max-width:1250px) { #side { grid-template-columns:1fr; } }
+  #room { display:flex; flex-direction:column; gap:10px; } .lock { color:var(--acc); font-weight:600; }
+  .people { display:flex; gap:4px; flex-wrap:wrap; margin-top:6px; }
+  .people span { background:var(--bg); border:1px solid var(--line); border-radius:10px; padding:1px 8px; font-size:12px; }
+  .people span.me { border-color:var(--acc); }
+  .picks div { display:flex; justify-content:space-between; padding:2px 0; } .picks .who { color:var(--dim); }
+  #chat { display:flex; flex-direction:column; height:min(52vh,460px); padding:0; overflow:hidden; }
+  #chatLog { flex:1; overflow:auto; padding:8px 12px; display:flex; flex-direction:column; gap:3px; }
+  #chatLog .m b { color:var(--acc); font-weight:600; margin-right:5px; } #chatLog .m.me b { color:#7fb0ff; }
+  #chatLog .at { align-self:center; font-size:11px; color:var(--dim); margin:4px 0; }
+  #chatForm { display:flex; border-top:1px solid var(--line); }
+  #chatForm input, #nameForm input { flex:1; padding:9px 12px; background:transparent; color:var(--fg); border:0; outline:0; }
+  #nameForm { display:flex; gap:6px; } #nameForm input { border:1px solid var(--line); border-radius:6px; padding:7px 10px; } #settings label { display:flex; gap:8px; align-items:center; margin:4px 0; cursor:pointer; }
 </style>
 </head>
 <body>
 <header>
-  <input id="url" placeholder="Paste a Lichess broadcast round URL or a lichess.org game URL">
+  <input id="url" placeholder="Lichess game or broadcast link">
   <button id="add">Watch</button>
   <button id="notif">Enable notifications</button>
+  <button id="gear" title="Settings">⚙</button>
 </header>
+<div id="settings" class="card" hidden></div>
+<style id="pieceCss"></style>
 <div id="msg" class="msg" hidden></div>
 <div id="sources"></div>
 <script>
@@ -60,13 +100,14 @@
   })();
 </script>
 <main>
-  <aside id="games"><div class="g dim">No games yet — paste a URL above.</div></aside>
+  <aside id="games"><div class="g dim">No games yet</div></aside>
   <div><div class="clk" id="clkTop"></div><div id="board"></div><div class="clk" id="clkBot"></div></div>
-  <section id="panel"></section>
+  <div id="side"><section id="panel"></section><aside id="room"></aside></div>
 </main>
 <script type="module">
 import { Chess, parseInput, addSource, dropGame, follows, pgnGameId, readPgn, readGameInfo, readTick,
-  toUci, revealGuesses, toggleBell, bellsFromWatcher, moveNo, fmtClock, fmtStart } from './lib.js';
+  toUci, revealGuesses, toggleBell, bellsFromWatcher, moveNo, fmtClock, fmtStart, moveRows,
+  BOARDS, PIECES, pieceUrl, pieceCss, readSettings, gameUrl, roomScores, newCid, parseRoomHash } from './lib.js';
 import { Chessground } from 'https://cdn.jsdelivr.net/npm/chessground@9.1.1/+esm';
 
 const API = 'https://lichess.org';
@@ -79,6 +120,7 @@ let sources = LS.get('lb:sources', []);   // [{kind:'round'|'game', id, label}]
 const guesses = LS.get('lb:guesses', {}); // gameId -> {ply: {uci, san, actual, actualSan, match, eval, bestSan}}
 const bells = LS.get('lb:bells', {});     // gameId -> {name, url}: pop up on every move (the watcher's list when it runs)
 const save = () => { LS.set('lb:guesses', guesses); LS.set('lb:bells', bells); LS.set('lb:sources', sources); };
+const settings = readSettings(LS.get('lb:settings', null)); // board colours, piece set, coordinates, sound
 
 const games = new Map();   // id -> {id, src, name, fens[], ucis[], sans[], result, over, unseen, ri}
 const ctrls = new Map();   // source id -> AbortController
@@ -210,6 +252,9 @@ function update(g, ucis, sans, fens) {
   if (fresh && g.id !== cur) g.unseen += added;
   reveal(g);
   if (fresh) notify(g);
+  if (fresh && g.id === cur) tock();
+  syncPlayed(g);
+  if (room?.game?.id === g.id) { renderRoom(); renderChat(); }
   if (!pick(g) && g.id === cur) { draw(); renderPanel(); }
   renderList();
 }
@@ -238,8 +283,48 @@ function notify(g) {
 // ---------- board ----------
 const cg = Chessground($('#board'), {
   movable: { free: false, showDests: true, events: { after: (o, d) => onUserMove(o, d) } },
-  draggable: { showGhost: true }, highlight: { lastMove: true, check: true },
+  draggable: { showGhost: true }, highlight: { lastMove: true, check: true }, coordinates: settings.coords,
 });
+
+// ---------- look: board colours, pieces, coordinates, sound ----------
+function applySettings() {
+  const [l, d] = BOARDS[settings.board];
+  $('#board').style.setProperty('--sq-l', l); $('#board').style.setProperty('--sq-d', d);
+  $('#pieceCss').textContent = pieceCss(settings.pieces);
+  if (cg.state.coordinates !== settings.coords) { cg.set({ coordinates: settings.coords }); cg.redrawAll(); }
+  LS.set('lb:settings', settings);
+}
+function renderSettings() {
+  const el = $('#settings');
+  el.innerHTML = `<h4>Board</h4><div class="swatches">${Object.entries(BOARDS).map(([k, [l, d]]) =>
+      `<button data-board="${k}" class="${k === settings.board ? 'sel' : ''}" title="${k}" style="--l:${l};--d:${d}"></button>`).join('')}</div>
+    <h4>Pieces</h4><div class="sets">${Object.keys(PIECES).map(k =>
+      `<button data-pieces="${k}" class="${k === settings.pieces ? 'sel' : ''}" title="${k} (${PIECES[k]})"><img src="${pieceUrl(k, 'wN')}" alt="${k}"></button>`).join('')}</div>
+    <h4>Options</h4>
+    <label><input type="checkbox" id="optCoords" ${settings.coords ? 'checked' : ''}> Coordinates</label>
+    <label><input type="checkbox" id="optSound" ${settings.sound ? 'checked' : ''}> Sound when a move lands</label>`;
+  el.querySelectorAll('[data-board]').forEach(b => b.onclick = () => { settings.board = b.dataset.board; applySettings(); renderSettings(); });
+  el.querySelectorAll('[data-pieces]').forEach(b => b.onclick = () => { settings.pieces = b.dataset.pieces; applySettings(); renderSettings(); });
+  $('#optCoords').addEventListener('change', e => { settings.coords = e.target.checked; applySettings(); });
+  $('#optSound').addEventListener('change', e => { settings.sound = e.target.checked; applySettings(); if (settings.sound) tock(); });
+}
+$('#gear').onclick = e => { e.stopPropagation(); const el = $('#settings'); el.hidden = !el.hidden; $('#gear').classList.toggle('on', !el.hidden); if (!el.hidden) renderSettings(); };
+document.addEventListener('click', e => {
+  // composedPath, not closest: picking a swatch redraws the panel, so the clicked button is already detached
+  if (!$('#settings').hidden && !e.composedPath().some(n => n.id === 'settings' || n.id === 'gear')) { $('#settings').hidden = true; $('#gear').classList.remove('on'); }
+});
+let audio;
+function tock() { // a short wooden click, made on the spot so there's no sound file to ship
+  if (!settings.sound) return;
+  try {
+    audio ??= new AudioContext();
+    const t = audio.currentTime, o = audio.createOscillator(), v = audio.createGain();
+    o.type = 'triangle'; o.frequency.setValueAtTime(520, t); o.frequency.exponentialRampToValueAtTime(180, t + 0.08);
+    v.gain.setValueAtTime(0.25, t); v.gain.exponentialRampToValueAtTime(0.001, t + 0.12);
+    o.connect(v).connect(audio.destination); o.start(t); o.stop(t + 0.13);
+  } catch {}
+}
+applySettings();
 const tryMove = (c, o, d) => { try { return c.move({ from: o, to: d, promotion: 'q' }); } catch { return null; } };
 function dests(c) {
   const m = new Map();
@@ -282,6 +367,7 @@ const uciSq = u => u ? [u.slice(0, 2), u.slice(2, 4)] : undefined;
 function onUserMove(o, d) {
   const g = games.get(cur);
   if (pinned) { tryMove(explore, o, d); return draw(); }
+  if (myLock(g.id, g.ucis.length)) return draw(); // locked in: can't change it any more
   const c = new Chess(g.fens.at(-1)), m = tryMove(c, o, d);
   if (m) { (guesses[g.id] ??= {})[g.ucis.length] = { uci: toUci(m), san: m.san }; save(); }
   draw(); renderPanel();
@@ -289,7 +375,7 @@ function onUserMove(o, d) {
 function select(id) {
   cur = id; pinned = false; explore = null; feedback = null;
   const g = games.get(id); g.unseen = 0;
-  draw(); renderPanel(); renderList();
+  draw(); renderPanel(); renderList(); renderRoom();
   $('#clkTop').scrollIntoView({ block: 'nearest', behavior: 'smooth' });
 }
 function setPinned(on) {
@@ -302,8 +388,16 @@ function step(d) {
   const g = games.get(cur); if (!g) return;
   if (d === Infinity) return setPinned(false);
   if (!pinned) { if (d > 0) return; setPinned(true); }
-  if (d === -1 && explore.history().length) explore.undo(); // undo your own line first
-  else { pinPly = Math.max(0, Math.min(g.ucis.length, d === -Infinity ? 0 : pinPly + d)); explore = new Chess(g.fens[pinPly]); }
+  if (d === -1 && explore.history().length) { explore.undo(); draw(); return renderPanel(); } // undo your own line first
+  goTo(d === -Infinity ? 0 : pinPly + d);
+}
+// Show the position after `n` moves of the real game (from the move list). The latest move means live.
+// Stepping ▶ to the end stays pinned (your line is kept safe); clicking the latest move in the list goes live.
+function goTo(n, fromList = false) {
+  const g = games.get(cur); if (!g) return;
+  n = Math.max(0, Math.min(g.ucis.length, n));
+  if (fromList && n === g.ucis.length) return setPinned(false);
+  pinned = true; pinPly = n; explore = new Chess(g.fens[n]);
   draw(); renderPanel();
 }
 document.addEventListener('keydown', e => {
@@ -334,7 +428,7 @@ function drop(g) {
 }
 function renderList() {
   const el = $('#games'), list = [...games.values()];
-  if (!list.length) { el.innerHTML = '<div class="g dim">No games yet — paste a URL above.</div>'; document.title = 'Your Move'; return; }
+  if (!list.length) { el.innerHTML = '<div class="g dim">No games yet</div>'; document.title = 'Your Move'; return; }
   el.innerHTML = list.map(g => `<div class="g ${g.id === cur ? 'cur' : ''}" data-id="${g.id}">
     <div class="n">${esc(g.name)}<small>${g.over ? g.result : g.ucis.length ? `${g.ucis.length} plies · live`
       : g.src.startsAt > Date.now() ? `starts ${fmtStart(g.src.startsAt)}` : 'not started'}</small></div>
@@ -354,45 +448,198 @@ function renderList() {
   document.title = (n ? `(${n}) ` : '') + 'Your Move';
 }
 const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+// The whole game: the move you're looking at is highlighted, your own moves sit under the players'.
+function movesHtml(g) {
+  const rows = moveRows(g.sans, guesses[g.id], g.over), at = (pinned ? pinPly : g.ucis.length) - 1;
+  if (!rows.length) return '<div class="moves"><div class="empty">No moves yet.</div></div>';
+  const cell = c => !c ? '<div></div>'
+    : c.pending ? `<div class="mv pending" title="Your move, waiting for the player">${esc(c.pending)}?</div>`
+    : `<div class="mv${c.ply === at ? ' cur' : ''}" data-ply="${c.ply}">${esc(c.san)}${c.mine
+      ? `<i class="${c.match ? 'hit' : ''}">${c.match ? '✓ you too' : `you: ${esc(c.mine)}`}</i>` : ''}</div>`;
+  return `<div class="moves">${rows.map(r => `<div class="no">${r.no}.</div>${cell(r.cells[0])}${cell(r.cells[1])}`).join('')}</div>`;
+}
 function renderPanel() {
   const g = games.get(cur), el = $('#panel');
-  if (!g) return el.innerHTML = '<div class="card dim">Pick a game on the left.</div>';
+  if (!g) return el.innerHTML = '<div class="card dim">No game open</div>';
   const ply = g.ucis.length, side = ply % 2 ? 'Black' : 'White', mine = guesses[g.id]?.[ply];
-  const gs = Object.entries(guesses[g.id] || {}).filter(([, x]) => x.actual).sort((a, b) => a[0] - b[0]);
-  const same = gs.filter(([, x]) => x.match).length, names = g.name.split(' – ');
-  const mover = q => names[q % 2] || (q % 2 ? 'Black' : 'White');
+  const gs = Object.values(guesses[g.id] || {}).filter(x => x.actual), same = gs.filter(x => x.match).length;
+  const locked = myLock(g.id, ply), inRoom = room && room.game?.id === g.id;
   let status;
   if (pinned) {
     const ahead = ply - pinPly, line = explore.history();
-    status = `<b>Pinned</b> at ${pinPly ? `${moveNo(pinPly - 1)} ${g.sans[pinPly - 1]}` : 'the start'} <span class="dim">(${pinPly}/${ply})</span>
-      ${line.length ? `<br>Your line: <b>${line.join(' ')}</b>` : '<br><span class="dim">Drag pieces to try lines · ◀ ▶ or arrow keys step through the game</span>'}
+    status = `<b>Pinned</b> at ${pinPly ? `${moveNo(pinPly - 1)} ${g.sans[pinPly - 1]}` : 'the start'}
+      ${line.length ? `<br>Your line: <b>${line.join(' ')}</b>` : ''}
       ${ahead > 0 ? `<br><span class="bad">Live is ${ahead} move${ahead > 1 ? 's' : ''} ahead</span>` : ''}
       <div class="row" style="margin-top:6px"><button id="reset">Reset line</button><button id="catch" class="on">Catch up</button></div>`;
   } else if (g.over) status = `<b>Game over: ${g.result}</b>`;
-  else if (!ply && g.src.startsAt > Date.now()) status = `<b>Not started yet.</b> Starts ${fmtStart(g.src.startsAt)}.
-    ${mine ? `You'd open with <b>${mine.san}</b>. Drag again to change your mind.` : 'What would you open with?'}`;
-  else status = mine ? `You'd play <b>${mine.san}</b>. Take your time: drag again to change it until ${mover(ply)} moves.`
-    : `<b>${side} to move.</b> What would you play? Drag your move.`;
+  else {
+    const head = !ply && g.src.startsAt > Date.now() ? `<b>Starts ${fmtStart(g.src.startsAt)}</b>` : `<b>${side} to move</b>`;
+    status = locked ? `${head} · <span class="lock">🔒 ${esc(locked.san)}</span>`
+      : mine ? `${head} · you: <b>${esc(mine.san)}</b>${inRoom ? ' <button id="lockIn" class="on">🔒 Lock in</button>' : ''}`
+      : head;
+  }
   // No engine, no verdict: like watching in the hall, you just see your move next to theirs.
   const fb = feedback && guesses[g.id]?.[feedback.ply], f = fb && `<div class="card">
-      ${moveNo(feedback.ply)} You'd play <b>${fb.san}</b> · ${esc(mover(feedback.ply))} played <b>${fb.actualSan}</b>
-      ${fb.match ? '<div class="ok">Same idea as the player.</div>' : ''}</div>`;
-  const table = (g.over && gs.length) ? `<div class="card"><b>Your moves next to the game</b>
-      <div class="dim">You and the players chose the same move ${same} of ${gs.length} times</div>
-      <table><tr><th>Move</th><th>You</th><th>Played</th></tr>${gs.map(([p, x]) =>
-      `<tr><td>${moveNo(+p)}</td><td>${x.san}</td><td class="${x.match ? 'ok' : ''}">${x.actualSan}</td></tr>`).join('')}</table></div>` : '';
-  el.innerHTML = `<div class="card"><b>${esc(g.name)}</b><div class="dim">${ply ? `Last: ${moveNo(ply - 1)} ${g.sans.at(-1)}` : 'No moves yet'}
-      ${gs.length && !g.over ? ` · same move as the players ${same}/${gs.length}` : ''}</div></div>
-    <div class="card">${status}</div>${f || ''}${table}
-    <div class="row"><button data-step="-Infinity" title="Start (Home)">⏮</button><button data-step="-1" title="Back (←)">◀</button>
-      <button data-step="1" title="Forward (→)">▶</button><button data-step="Infinity" title="Live (End)">⏭</button></div>
-    <div class="row"><button id="pin" class="${pinned ? 'on' : ''}">${pinned ? 'Unpin' : 'Pin this position'}</button>
-      <button id="flip">Flip board</button></div>`;
+      ${moveNo(feedback.ply)} you <b>${esc(fb.san)}</b> · played <b class="${fb.match ? 'ok' : ''}">${esc(fb.actualSan)}</b>${fb.match ? ' ✓' : ''}</div>`;
+  el.innerHTML = `<div class="card"><b>${esc(g.name)}</b>${gs.length ? `<div class="dim">same move ${same}/${gs.length}</div>` : ''}</div>
+    <div class="card">${status}</div>${f || ''}
+    <div class="card">${movesHtml(g)}
+      <div class="nav"><button data-step="-Infinity" title="Start (Home)">⏮</button><button data-step="-1" title="Back (←)">◀</button>
+      <button data-step="1" title="Forward (→)">▶</button><button data-step="Infinity" title="Live (End)" class="${pinned ? '' : 'on'}">⏭</button></div></div>
+    <div class="row"><button id="pin" class="${pinned ? 'on' : ''}">${pinned ? 'Unpin' : 'Pin'}</button>
+      <button id="flip">Flip</button></div>`;
+  $('#lockIn')?.addEventListener('click', () => lockIn(g));
   el.querySelectorAll('[data-step]').forEach(b => b.onclick = () => step(+b.dataset.step));
+  el.querySelectorAll('.mv[data-ply]').forEach(c => c.onclick = () => goTo(+c.dataset.ply + 1, true));
+  const box = el.querySelector('.moves'), at = box?.querySelector('.cur, .pending');
+  if (at) box.scrollTop = at.offsetTop - box.clientHeight / 2 + at.offsetHeight / 2; // keep the move you're on in view
   $('#pin').onclick = () => setPinned(!pinned);
   $('#flip').onclick = () => { orient = orient === 'white' ? 'black' : 'white'; draw(); };
   if (pinned) { $('#catch').onclick = () => setPinned(false); $('#reset').onclick = () => { explore = new Chess(g.fens[pinPly]); draw(); }; }
 }
+
+// ---------- rooms: watch with friends ----------
+// The room lives on the watcher that served this page (yours, or a friend's through a tunnel).
+// The page long-polls it, which gets through any tunnel or proxy.
+// Everyone locks in a move before the player makes it; you see friends' moves once you've locked
+// yours or the real move is in.
+let room = null, roomsOn = false, publicUrl = null, poller = null; // room: {id, game, chat, picks, played, people}
+const me = LS.get('lb:me', null) || { cid: newCid(), name: '' };
+LS.set('lb:me', me);
+const myLock = (gid, ply) => room?.picks?.[gid]?.[ply]?.find(x => x.me);
+async function roomPost(body) {
+  const r = await fetch(`/room/${room.id}`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ cid: me.cid, name: me.name, ...body }) }).catch(() => null);
+  if (!r) return say('Lost the room connection.') || false;
+  if (!r.ok) { say((await r.json().catch(() => ({}))).error || 'Room error'); return false; }
+  return true;
+}
+function joinRoom(id) {
+  if (room?.id === id && poller) return;
+  poller?.abort(); poller = null;
+  room = { id, chat: [], picks: {}, played: {}, people: [], game: null, version: 0 };
+  if (!me.name) return renderRoom();
+  renderRoom(); pollRoom(id);
+}
+// Ask the watcher for news and wait; it answers when the room changes (or after 25s), then ask again.
+async function pollRoom(id) {
+  const ac = poller = new AbortController();
+  while (!ac.signal.aborted) {
+    const after = room.chat.at(-1)?.id || 0;
+    try {
+      const r = await fetch(`/room/${id}/poll?cid=${me.cid}&name=${encodeURIComponent(me.name)}&since=${room.version}&after=${after}`, { signal: ac.signal });
+      if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `HTTP ${r.status}`);
+      onRoomState(await r.json());
+    } catch (e) {
+      if (ac.signal.aborted) return;
+      say(`Room: ${e.message}. Retrying…`); await new Promise(f => setTimeout(f, 3000));
+    }
+  }
+}
+function leaveRoom() {
+  poller?.abort(); poller = null; room = null;
+  history.replaceState(null, '', location.pathname);
+  renderRoom(); renderPanel();
+}
+function onRoomState(st) {
+  const first = !room.version, newGame = st.game?.id !== room.game?.id;
+  const { chat, ...rest } = st;
+  Object.assign(room, rest);
+  if (chat.length) room.chat = [...room.chat, ...chat].slice(-300);
+  if ($('#msg').textContent.startsWith('Room:')) say('');
+  renderChat(first); renderRoom(); renderPanel(); draw();
+  if (first || newGame) openRoomGame();
+}
+function openRoomGame() { // everyone in the room watches the room's game
+  const gm = room?.game; if (!gm) return;
+  if (games.has(gm.id)) { syncPlayed(games.get(gm.id)); if (cur !== gm.id) select(gm.id); return; }
+  $('#url').value = gm.url; $('#add').click();
+}
+function syncPlayed(g) {
+  if (room?.game?.id === g.id && g.ucis.length > (room.played[g.id] || 0)) roomPost({ type: 'played', game: g.id, ply: g.ucis.length });
+}
+async function lockIn(g) {
+  const ply = g.ucis.length, x = guesses[g.id]?.[ply];
+  if (x && await roomPost({ type: 'lock', game: g.id, ply, uci: x.uci, san: x.san })) say('');
+}
+async function createRoom() {
+  const r = await fetch('/rooms', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }).catch(() => null);
+  if (!r?.ok) return say('Could not create a room.');
+  const { id } = await r.json();
+  history.replaceState(null, '', `#room=${id}`);
+  joinRoom(id);
+  const g = games.get(cur);
+  if (g && me.name) roomPost({ type: 'game', game: { id: g.id, url: gameUrl(g), name: g.name } });
+}
+// The link friends can open: the watcher's public --share link if it has one, else this page's own address.
+const roomLink = () => `${publicUrl || location.origin}/#room=${room.id}`;
+const onlyHere = () => !publicUrl && /^(localhost|127\.0\.0\.1|\[::1\])$/.test(location.hostname);
+function renderRoom() {
+  const el = $('#room');
+  if (!roomsOn) return el.innerHTML = '';
+  if (!room) {
+    el.innerHTML = `<div class="card"><b>Friends</b><div class="row" style="margin-top:6px">
+      <button id="mkRoom" ${cur ? '' : 'disabled'}>New room</button></div></div>`;
+    return $('#mkRoom').onclick = () => { if (!me.name) { room = { id: null }; return renderRoom(); } createRoom(); };
+  }
+  if (!me.name || !room.id) {
+    el.innerHTML = `<div class="card"><b>Your name</b><form id="nameForm" style="margin-top:6px">
+      <input id="nameIn" maxlength="24" autocomplete="nickname" required><button>Join</button></form></div>`;
+    $('#nameIn').focus();
+    return $('#nameForm').addEventListener('submit', e => {
+      e.preventDefault(); me.name = $('#nameIn').value.trim().slice(0, 24); if (!me.name) return;
+      LS.set('lb:me', me);
+      if (room.id) { const id = room.id; room = null; joinRoom(id); } else { room = null; createRoom(); }
+    });
+  }
+  const g = room.game && games.get(room.game.id), ply = g ? g.ucis.length : 0;
+  const now = room.picks[room.game?.id]?.[ply] || [], last = ply && room.picks[room.game?.id]?.[ply - 1] || [];
+  const scores = g ? roomScores(room.picks[g.id], g.ucis) : [];
+  const pick = x => x.san ? `<b>${esc(x.san)}</b>` : '<span class="lock">🔒</span>';
+  let top = el.querySelector('#roomTop');
+  if (!top) {
+    el.innerHTML = `<div id="roomTop"></div><div class="card" id="chat"><div id="chatLog"></div>
+      <form id="chatForm"><input id="chatIn" maxlength="500" placeholder="Message" autocomplete="off"><button>Send</button></form></div>`;
+    $('#chatForm').addEventListener('submit', e => {
+      e.preventDefault(); const t = $('#chatIn').value.trim(); if (!t) return;
+      const rg = room.game && games.get(room.game.id);
+      roomPost({ type: 'chat', text: t, ply: rg ? rg.ucis.length : null }).then(ok => ok && ($('#chatIn').value = ''));
+    });
+    top = $('#roomTop'); renderChat(true);
+  }
+  top.innerHTML = `<div class="card"><div class="row" style="justify-content:space-between;align-items:center">
+      <b>Room ${room.id}</b><span class="row"><button id="copyLink">Copy link</button><button id="leave" title="Leave room">✕</button></span></div>
+    ${onlyHere() ? '<div class="dim" style="font-size:12px">Link works on this Mac only. Run <code>python3 watcher.py --share</code> to invite friends.</div>' : ''}
+    <div class="people">${room.people.map(n => `<span class="${n === me.name ? 'me' : ''}">${esc(n)}</span>`).join('')}</div>
+    ${cur && cur !== room.game?.id ? `<button id="useGame" style="margin-top:8px">Watch this game here</button>` : ''}</div>
+    ${g && !g.over ? `<div class="card picks"><b>${moveNo(ply)} locked in</b>${now.length
+      ? now.map(x => `<div><span class="who">${esc(x.name)}</span>${pick(x)}</div>`).join('') : '<div class="dim">nobody yet</div>'}</div>` : ''}
+    ${last.length ? `<div class="card picks"><b>${moveNo(ply - 1)} ${esc(g.sans[ply - 1])}</b>${last.map(x =>
+      `<div><span class="who">${esc(x.name)}</span><span class="${x.uci === g.ucis[ply - 1] ? 'ok' : ''}">${esc(x.san)}${x.uci === g.ucis[ply - 1] ? ' ✓' : ''}</span></div>`).join('')}</div>` : ''}
+    ${scores.length ? `<div class="card picks"><b>Score</b>${scores.map(s =>
+      `<div><span class="who">${esc(s.name)}</span><span>${s.hits}/${s.of}</span></div>`).join('')}</div>` : ''}`;
+  $('#copyLink').onclick = async () => { // ask again: --share may have got its link after this page loaded
+    publicUrl = (await fetch('/rooms').then(r => r.json()).catch(() => null))?.public || publicUrl;
+    navigator.clipboard?.writeText(roomLink()).then(() => { $('#copyLink').textContent = 'Copied'; setTimeout(() => $('#copyLink') && ($('#copyLink').textContent = 'Copy link'), 1500); }); renderRoom(); };
+  $('#leave').onclick = leaveRoom;
+  $('#useGame') && ($('#useGame').onclick = () => { const cg_ = games.get(cur); roomPost({ type: 'game', game: { id: cg_.id, url: gameUrl(cg_), name: cg_.name } }); });
+}
+function renderChat(all) {
+  const log = $('#chatLog'); if (!log || !room) return;
+  const stick = log.scrollHeight - log.scrollTop - log.clientHeight < 40;
+  const g = room.game && games.get(room.game.id);
+  let lastPly = null;
+  log.innerHTML = room.chat.map(m => {
+    // a small marker when the game has moved on between messages
+    const at = m.ply != null && m.ply !== lastPly && m.ply > 0 && g?.sans[m.ply - 1]
+      ? `<div class="at">${moveNo(m.ply - 1)} ${esc(g.sans[m.ply - 1])}</div>` : '';
+    if (m.ply != null) lastPly = m.ply;
+    return `${at}<div class="m ${m.name === me.name ? 'me' : ''}"><b>${esc(m.name)}</b>${esc(m.text)}</div>`;
+  }).join('');
+  if (all || stick) log.scrollTop = log.scrollHeight;
+}
+fetch('/rooms').then(r => r.ok && r.headers.get('Content-Type') === 'application/json' ? r.json() : null).catch(() => null)
+  .then(info => { roomsOn = !!info; publicUrl = info?.public || null; renderRoom(); });
 
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) return;
@@ -423,6 +670,8 @@ renderNotif(); renderSources(); renderPanel();
 sources.forEach(watch);
 // Deep links: watcher.py (and shared links) open the app as /#<lichess url> to jump straight to a game.
 function openFromHash() {
+  const rid = parseRoomHash(location.hash);
+  if (rid) return joinRoom(rid); // the room link stays in the address bar, so reloading rejoins
   if (location.hash.length < 2) return;
   $('#url').value = decodeURIComponent(location.hash.slice(1));
   history.replaceState(null, '', location.pathname); $('#add').click();

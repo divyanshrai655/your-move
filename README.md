@@ -25,10 +25,50 @@ straight to the position.
   lands, then see your move next to theirs.
 - A link to one game follows just that game; a round link follows all of it. ✕
   drops a game.
+- The whole game is listed on the right, with your move under each of the
+  players'. Click a move to see that position.
 - Pin a position to keep thinking while the game moves on, step through moves
-  with ◀ ▶, and try your own lines.
-- Live clocks and start times. At the end of a game you get your moves next to
-  the players'.
+  with ◀ ▶ or the arrow keys, and try your own lines.
+- Live clocks and start times.
+
+## Settings
+
+**⚙** sets the board colours, the piece set, coordinates, and a sound when a move
+lands. Piece sets are loaded from Lichess's repository and are all openly
+licensed; each set's license is listed in `lib.js`.
+
+## With friends
+
+Your Mac is the server, so there is nothing to host or pay for. Start the
+watcher with `--share` (once: `brew install cloudflared`):
+
+```bash
+python3 watcher.py --share
+```
+
+It prints a public link like `https://some-random-words.trycloudflare.com`. Then
+in the app:
+
+1. Open the game you want to watch and press **New room**.
+2. Pick a name, press **Copy link**, and send that link to your friends. It
+   opens the room and the game for them, with nothing to install.
+
+In a room everyone watches the same game, chats, and locks in moves:
+
+- Drag your move, then press **🔒 Lock in**. A locked move can't be changed.
+- Friends see that you've locked in, but not what, until they lock in too or the
+  player moves. Then everyone's moves show, with a running score.
+- **Watch this game here** moves the room to the game you have open.
+
+Good to know:
+
+- The link only works while the watcher runs, and it changes every time you
+  start it. Send the new one after a restart. Rooms and chat are kept in
+  `rooms.json`.
+- Through the link, friends get the app and its rooms and nothing else. They
+  can't see your files or your 🔔 list.
+- There are no accounts: anyone with the link can join under any name. Share it
+  only with people you'd invite.
 
 ## Tests
 

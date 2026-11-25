@@ -5,6 +5,7 @@ import { readFileSync } from 'node:fs';
 import {
   Chess, parseInput, addSource, dropGame, follows, pgnGameId, readPgn, readGameInfo, readTick,
   playUci, revealGuesses, toggleBell, bellsFromWatcher, moveNo, fmtClock, fmtStart,
+  moveRows, BOARDS, PIECES, pieceCss, readSettings, roomScores, parseRoomHash, gameUrl,
 } from '../lib.js';
 
 const fixture = name => readFileSync(new URL(`./fixtures/${name}`, import.meta.url), 'utf8');
@@ -197,4 +198,51 @@ test('start times say how long to wait', () => {
   const now = Date.UTC(2026, 10, 24, 8, 34);
   assert.match(fmtStart(now + (5 * 60 + 26) * 60000, now), /\(in 5h 26m\)$/);
   assert.doesNotMatch(fmtStart(now - 60000, now), /in /);
+});
+
+// ---------- move list ----------
+test('the move list pairs moves into numbered rows and shows your move under the player\'s', () => {
+  const g = { 0: { uci: 'e2e4', san: 'e4' }, 1: { uci: 'c7c5', san: 'c5' }, 3: { uci: 'b8c6', san: 'Nc6' } };
+  revealGuesses(g, ['e2e4', 'e7e5', 'g1f3'], ['e4', 'e5', 'Nf3']);
+  const rows = moveRows(['e4', 'e5', 'Nf3'], g);
+  assert.equal(rows.length, 2);
+  assert.deepEqual(rows[0], { no: 1, cells: [{ ply: 0, san: 'e4', mine: 'e4', match: true }, { ply: 1, san: 'e5', mine: 'c5', match: false }] });
+  // your pick for the next move waits at the end, until the player moves
+  assert.deepEqual(rows[1].cells, [{ ply: 2, san: 'Nf3' }, { ply: 3, pending: 'Nc6' }]);
+  assert.equal(moveRows(['e4', 'e5', 'Nf3'], g, true)[1].cells[1], null); // not once the game is over
+  assert.deepEqual(moveRows([], undefined), []);
+});
+
+// ---------- look ----------
+test('settings fall back to defaults for unknown or broken saved values', () => {
+  assert.deepEqual(readSettings(null), { board: 'brown', pieces: 'cburnett', coords: true, sound: true });
+  assert.deepEqual(readSettings({ board: 'nope', pieces: 'gone', coords: false }), { board: 'brown', pieces: 'cburnett', coords: false, sound: true });
+  assert.equal(readSettings({ board: 'green' }).board, 'green');
+});
+test('every piece set names its license, and swapping sets covers all twelve pieces', () => {
+  for (const [k, lic] of Object.entries(PIECES)) assert.match(lic, /GPL|MIT|Apache|CC0|CC BY-SA/, k);
+  assert.equal(pieceCss('cburnett'), '');
+  assert.equal(pieceCss('merida').split('\n').length, 12);
+  assert.match(pieceCss('merida'), /piece\.knight\.black\{background-image:url\('[^']+\/merida\/bN\.svg'\)/);
+  for (const [l, d] of Object.values(BOARDS)) { assert.match(l, /^#[0-9a-f]{6}$/); assert.match(d, /^#[0-9a-f]{6}$/); }
+});
+
+// ---------- rooms ----------
+test('room scores count friends\' locked moves that matched, and skip hidden or unplayed ones', () => {
+  const picks = {
+    0: [{ name: 'Ann', me: true, san: 'e4', uci: 'e2e4' }, { name: 'Bob', me: false, san: 'd4', uci: 'd2d4' }],
+    1: [{ name: 'Ann', me: true, san: 'c5', uci: 'c7c5' }, { name: 'Bob', me: false, san: 'e5', uci: 'e7e5' }],
+    2: [{ name: 'Bob', me: false }], // still hidden
+  };
+  assert.deepEqual(roomScores(picks, ['e2e4', 'e7e5']), [
+    { name: 'Ann', me: true, hits: 1, of: 2 }, { name: 'Bob', me: false, hits: 1, of: 2 }]);
+  assert.deepEqual(roomScores(picks, ['e2e4']).map(s => [s.name, s.hits, s.of]), [['Ann', 1, 1], ['Bob', 0, 1]]);
+  assert.deepEqual(roomScores(undefined, []), []);
+});
+test('room links', () => {
+  assert.equal(parseRoomHash('#room=ab3dk9'), 'ab3dk9');
+  assert.equal(parseRoomHash('#room=AB3'), null);
+  assert.equal(parseRoomHash('#https://lichess.org/abcdefgh'), null);
+  assert.equal(gameUrl({ id: 'G1', src: { kind: 'round', id: 'R1' } }), 'https://lichess.org/broadcast/-/-/R1/G1');
+  assert.equal(gameUrl({ id: 'abcdefgh', src: { kind: 'game', id: 'abcdefgh' } }), 'https://lichess.org/abcdefgh');
 });

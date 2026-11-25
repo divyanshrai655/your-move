@@ -10,11 +10,12 @@ opens the app on that game.
   python3 watcher.py <url> [...]     # also follow these Lichess game/broadcast URLs
   python3 watcher.py --open          # open the board straight away instead of asking
   python3 watcher.py --print         # just log moves in the terminal (PORT=... to change port)
+  python3 watcher.py --share         # also open a public link so friends can join your rooms
 
 The games you follow are saved in follow.json next to this file, so they survive restarts.
 Standard library only. Desktop popups need macOS; elsewhere moves are printed.
 """
-import functools, http.server, json, os, re, socket, subprocess, sys, threading, time
+import atexit, functools, http.server, json, os, re, shutil, signal, socket, subprocess, sys, threading, time
 import urllib.parse, urllib.request
 
 PORT = int(os.environ.get("PORT", 8765))
@@ -25,6 +26,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 FOLLOW_FILE = os.environ.get("FOLLOW_FILE", os.path.join(HERE, "follow.json"))
 AUTO_OPEN = "--open" in sys.argv
 PRINT_ONLY = "--print" in sys.argv  # log moves in the terminal, no popups
+SHARE = "--share" in sys.argv  # open a public cloudflared link to this watcher for friends
+public_url = None  # that link, once cloudflared has one
 
 follows = {}   # game id -> {"url", "name"}; "<roundId>:*" follows every game in a round
 running = {}   # source (round or game) id -> threading.Event that stops its thread
@@ -76,7 +79,164 @@ def set_follows(new):
     print("Following:", ", ".join(names) if names else "nothing yet - turn on a bell in the app")
 
 
-# ---------- web server: the app, plus /follow ----------
+# ---------- rooms: watch a game with friends ----------
+# A room has one game, a chat, and everyone's locked-in moves. Browsers keep a request open to
+# /room/<id>/poll and get the room back whenever it changes. You lock in a move before the player
+# makes it, and it can't be changed. Others see THAT you locked in, but not what, until you've locked
+# in too or the real move has been played. Rooms are saved to rooms.json so links survive restarts.
+ROOMS_FILE = os.environ.get("ROOMS_FILE", os.path.join(HERE, "rooms.json"))
+ROOM_ID = re.compile(r"[a-z0-9]{6}")
+CID = re.compile(r"[A-Za-z0-9]{8,40}")
+UCI = re.compile(r"[a-h][1-8][a-h][1-8][qrbn]?")
+MAX_CHAT = 300
+MAX_ROOMS = 200   # caps so one person can't fill the disk or tie up every thread
+MAX_PEOPLE = 30   # people per room
+PRESENT = 40      # seconds: someone who hasn't asked for news in this long has left
+WAIT = 25         # seconds a request for news waits for something to happen
+rooms = {}  # room id -> Room
+news = threading.Condition(lock)  # signalled whenever any room changes
+
+
+def clean_name(s):
+    return re.sub(r"\s+", " ", str(s or "")).strip()[:24]
+
+
+class Room:
+    def __init__(self, rid, saved=None):
+        s = saved or {}
+        self.id = rid
+        self.game = s.get("game")            # {"id", "url", "name"} or None
+        self.chat = s.get("chat", [])        # [{"id", "name", "text", "t", "ply"}]
+        self.picks = s.get("picks", {})      # game id -> ply (str) -> client id -> {"name", "san", "uci"}
+        self.played = s.get("played", {})    # game id -> how many moves the game has had
+        for i, m in enumerate(self.chat):    # rooms saved before messages had ids
+            m.setdefault("id", i + 1)
+        self.next_id = max([m["id"] for m in self.chat], default=0) + 1
+        self.seen = {}                       # client id -> {"name", "t"}: who has asked for news lately
+        # Goes up on every change. It's time-based, so it keeps going up across restarts and a browser
+        # that was waiting for "anything after version N" still hears about the next change.
+        self.version = int(time.time() * 1000)
+
+    def saved(self):
+        return {"game": self.game, "chat": self.chat, "picks": self.picks, "played": self.played}
+
+    def people(self):
+        return sorted({x["name"] for x in self.seen.values()})
+
+    def touch(self, cid, name, now):
+        """Note that cid is here. Returns True when the list of people changed."""
+        old = self.seen.get(cid)
+        self.seen[cid] = {"name": name, "t": now}
+        return not old or old["name"] != name
+
+    def prune(self, now):
+        """Forget people who stopped asking (closed the tab). Returns True when anyone left."""
+        gone = [c for c, x in self.seen.items() if now - x["t"] > PRESENT]
+        for c in gone:
+            del self.seen[c]
+        return bool(gone)
+
+    def bump(self):
+        with lock:
+            self.version = max(self.version + 1, int(time.time() * 1000))
+            news.notify_all()
+
+    def view_picks(self, cid):
+        """Everyone's locked moves as `cid` may see them: hidden until cid locked that move too, or it was played."""
+        out = {}
+        for g, plies in self.picks.items():
+            for p, by in plies.items():
+                open_ = cid in by or self.played.get(g, 0) > int(p)
+                out.setdefault(g, {})[p] = [
+                    {"name": x["name"], "me": c == cid, **({"san": x["san"], "uci": x["uci"]} if open_ else {})}
+                    for c, x in by.items()]
+        return out
+
+    def view(self, cid, after=0):
+        """The room as cid sees it, with the chat messages after id `after`."""
+        return {"version": self.version, "id": self.id, "game": self.game, "picks": self.view_picks(cid),
+                "played": self.played, "people": self.people(), "chat": [m for m in self.chat if m["id"] > after]}
+
+    def apply(self, cid, name, body):
+        """One change from a client. Returns the kind of event to send everyone, or raises ValueError."""
+        kind = body.get("type")
+        if kind == "chat":
+            text = str(body.get("text", "")).strip()[:500]
+            if not text:
+                raise ValueError("empty message")
+            ply = body.get("ply")
+            self.chat.append({"id": self.next_id, "name": name, "text": text, "t": int(time.time() * 1000),
+                              "ply": ply if isinstance(ply, int) else None})
+            self.next_id += 1
+            del self.chat[:-MAX_CHAT]
+            return "chat"
+        if kind == "lock":
+            g, ply, uci, san = str(body.get("game", "")), body.get("ply"), str(body.get("uci", "")), str(body.get("san", ""))[:12]
+            if not g or not isinstance(ply, int) or ply < 0 or not UCI.fullmatch(uci) or not san:
+                raise ValueError("expected game, ply, uci, san")
+            if ply < self.played.get(g, 0):
+                raise ValueError("that move has already been played")
+            by = self.picks.setdefault(g, {}).setdefault(str(ply), {})
+            if cid in by:
+                raise ValueError("you already locked in this move")
+            by[cid] = {"name": name, "san": san, "uci": uci}
+            return "picks"
+        if kind == "played":  # any client tells us the game has reached `ply` moves; that reveals the picks before it
+            g, ply = str(body.get("game", "")), body.get("ply")
+            if not g or not isinstance(ply, int) or ply < 0:
+                raise ValueError("expected game, ply")
+            if ply <= self.played.get(g, 0):
+                return None
+            self.played[g] = ply
+            return "picks"
+        if kind == "game":
+            g = body.get("game") or {}
+            gid, url = str(g.get("id", "")), str(g.get("url", ""))
+            if not gid or not parse(url):
+                raise ValueError("expected a Lichess game")
+            self.game = {"id": gid, "url": url, "name": str(g.get("name", ""))[:80]}
+            return "game"
+        raise ValueError("unknown change")
+
+
+def get_room(rid, create=True):
+    with lock:
+        if rid not in rooms and create and len(rooms) < MAX_ROOMS:
+            rooms[rid] = Room(rid)
+        return rooms.get(rid)
+
+
+def save_rooms():
+    try:
+        with lock:
+            data = {rid: r.saved() for rid, r in rooms.items()}
+        tmp = ROOMS_FILE + ".tmp"
+        with open(tmp, "w") as fh:
+            json.dump(data, fh)
+        os.replace(tmp, ROOMS_FILE)
+    except OSError as e:
+        print("could not save rooms.json:", e)
+
+
+def load_rooms():
+    try:
+        with open(ROOMS_FILE) as fh:
+            for rid, s in json.load(fh).items():
+                if ROOM_ID.fullmatch(rid) and isinstance(s, dict):
+                    rooms[rid] = Room(rid, s)
+    except (OSError, ValueError):
+        pass
+
+
+def new_room_id():
+    import secrets
+    while True:
+        rid = "".join(secrets.choice("abcdefghjkmnpqrstuvwxyz23456789") for _ in range(6))
+        if rid not in rooms:
+            return rid
+
+
+# ---------- web server: the app, /follow, and rooms ----------
 # The watcher's list of followed games is the one that counts. GET /follow shows it to the page;
 # POST /follow changes ONE game: {"add": {"id", "url", "name"}} or {"remove": id}. There is no way to
 # replace the whole list, so a second browser (with its own, maybe empty, bells) can't wipe it.
@@ -87,12 +247,67 @@ class Handler(http.server.SimpleHTTPRequestHandler):
     def log_message(self, *a):
         pass
 
+    def local(self):
+        """True for a browser on this Mac. Friends coming in through a tunnel arrive with the tunnel's
+        host name, and get the rooms but not your popups list."""
+        if any(self.headers.get(h) for h in ("Cf-Connecting-Ip", "Cf-Ray", "X-Forwarded-For", "Forwarded")):
+            return False  # came through a tunnel or proxy, whatever Host it claims
+        try:
+            host = urllib.parse.urlsplit("//" + (self.headers.get("Host") or "")).hostname
+        except ValueError:
+            return False
+        return host in ("localhost", "127.0.0.1", "::1")
+
+    # Only the app itself is served. Everything else in this folder (.git, follow.json, rooms.json with
+    # everyone's hidden moves) stays private, even when friends come in through a tunnel.
+    STATIC = {"/": "index.html", "/index.html": "index.html", "/lib.js": "lib.js", "/vendor/chess.js": "vendor/chess.js"}
+
     def do_GET(self):
-        if self.path != "/follow":
+        path, _, query = self.path.partition("?")
+        if path in self.STATIC:
+            self.path = "/" + self.STATIC[path]
             return super().do_GET()
+        if path == "/rooms":
+            return self.reply(200, {"rooms": True, "public": public_url})
+        m = re.fullmatch(r"/room/([a-z0-9]{6})/poll", path)
+        if m:
+            return self.room_poll(m.group(1), urllib.parse.parse_qs(query))
+        if path != "/follow":
+            return self.reply(404, {"error": "not found"})
+        if not self.local():
+            return self.reply(403, {"error": "only from this computer"})
         self.reply(200, follows)
 
+    def read_json(self):
+        # JSON only: a cross-site page can't send this without a CORS preflight we never approve.
+        if self.headers.get("Content-Type") != "application/json":
+            raise ValueError
+        n = int(self.headers.get("Content-Length", 0))
+        if n > 20000:
+            raise ValueError
+        body = json.loads(self.rfile.read(n) or b"{}")
+        if not isinstance(body, dict):
+            raise ValueError
+        return body
+
     def do_POST(self):
+        if self.path == "/rooms":
+            try:
+                self.read_json()
+            except ValueError:
+                return self.reply(400, {"error": "POST JSON"})
+            with lock:
+                if len(rooms) >= MAX_ROOMS:
+                    return self.reply(503, {"error": "too many rooms"})
+                rid = new_room_id()
+                rooms[rid] = Room(rid)
+            save_rooms()
+            return self.reply(200, {"id": rid})
+        m = re.fullmatch(r"/room/([a-z0-9]{6})", self.path)
+        if m:
+            return self.room_post(m.group(1))
+        if self.path == "/follow" and not self.local():
+            return self.reply(403, {"error": "only from this computer"})
         # JSON only: a cross-site page can't send this without a CORS preflight we never approve.
         if self.path != "/follow" or self.headers.get("Content-Type") != "application/json":
             return self.reply(400, {"error": "POST JSON to /follow"})
@@ -117,6 +332,56 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return self.reply(400, usage)
         set_follows(new)
         self.reply(200, follows)
+
+    def room_post(self, rid):
+        try:
+            body = self.read_json()
+        except ValueError:
+            return self.reply(400, {"error": "POST JSON"})
+        cid, name = str(body.get("cid", "")), clean_name(body.get("name"))
+        if not CID.fullmatch(cid) or not name:
+            return self.reply(400, {"error": "expected cid and name"})
+        room = get_room(rid)
+        if not room:
+            return self.reply(503, {"error": "too many rooms"})
+        with lock:
+            try:
+                kind = room.apply(cid, name, body)
+            except ValueError as e:
+                return self.reply(400, {"error": str(e)})
+            here = room.touch(cid, name, time.time())  # first, so posting also counts as being here
+            if kind or here:
+                room.bump()
+        if kind:
+            save_rooms()
+        self.reply(200, {"ok": True})
+
+    def room_poll(self, rid, q):
+        """Long polling: answer with the room as soon as it's newer than `since`, or after WAIT seconds.
+        Plain request/response, so it gets through any tunnel or proxy (Cloudflare quick tunnels don't
+        pass server-sent events through)."""
+        arg = lambda k: (q.get(k) or [""])[0]
+        cid, name = arg("cid"), clean_name(arg("name"))
+        try:
+            since, after = int(arg("since") or 0), int(arg("after") or 0)
+        except ValueError:
+            return self.reply(400, {"error": "since and after are numbers"})
+        if not CID.fullmatch(cid) or not name:
+            return self.reply(400, {"error": "expected cid and name"})
+        room = get_room(rid)
+        if not room:
+            return self.reply(503, {"error": "too many rooms"})
+        with lock:
+            if cid not in room.seen and len(room.seen) >= MAX_PEOPLE:
+                return self.reply(503, {"error": "room is full"})
+            now = time.time()
+            if room.touch(cid, name, now) | room.prune(now):
+                room.bump()
+            end = now + WAIT
+            while room.version <= since and time.time() < end:
+                news.wait(end - time.time())
+            view = room.view(cid, after)
+        self.reply(200, view)
 
     def reply(self, code, obj):
         data = json.dumps(obj).encode()
@@ -258,6 +523,30 @@ def watch_game(gid, stop):
             running.pop(gid)
 
 
+# ---------- sharing: a free, temporary public link through Cloudflare ----------
+def share():
+    """Start a cloudflared quick tunnel to this watcher and remember its https://….trycloudflare.com link.
+    Only the app and rooms are reachable through it (see Handler.STATIC and Handler.local)."""
+    exe = shutil.which("cloudflared")
+    if not exe:
+        print("--share needs cloudflared: brew install cloudflared")
+        return
+    p = subprocess.Popen([exe, "tunnel", "--no-autoupdate", "--url", f"http://localhost:{PORT}"],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+    atexit.register(p.terminate)
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))  # `kill` too, not only Ctrl-C, closes the link
+
+    def read():  # keep reading: cloudflared logs to stderr all the time, and a full pipe would stall it
+        global public_url
+        for line in p.stderr:
+            m = re.search(r"https://[a-z0-9-]+\.trycloudflare\.com", line)
+            if m and not public_url:
+                public_url = m.group(0)
+                print(f"Sharing at {public_url} - open a room and press Copy link to invite friends.")
+        print("The public link has stopped.")
+    threading.Thread(target=read, daemon=True).start()
+
+
 def port_in_use(port):
     """'localhost' can mean 127.0.0.1 or ::1, and another server may hold either one,
     so check both before starting. Returns the busy address, or None."""
@@ -294,6 +583,9 @@ def main():
     except OSError as e:
         sys.exit(f"Can't use port {PORT}: {e}")
     set_follows(saved)
+    load_rooms()
+    if SHARE:
+        share()
     print(f"Open {APP} and press the bell on any game to get desktop popups for it.")
     try:
         srv.serve_forever()
